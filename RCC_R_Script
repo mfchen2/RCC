@@ -1,0 +1,1414 @@
+if (!requireNamespace("devtools", quietly = TRUE)){install.packages("devtools")}
+devtools::install_github("jbisanz/qiime2R") # current version is 0.99.20
+BiocManager::install("DESeq2")
+BiocManager::install("ComplexHeatmap")
+BiocManager::install("ANCOMBC")
+BiocManager::install("edgeR")
+BiocManager::install("phytools")
+BiocManager::install("ggtree")
+BiocManager::install("NMF")
+install_github("ggobi/ggally")
+library(devtools)
+install_github("jokergoo/ComplexHeatmap")
+library(qiime2R)
+library(tidyverse)
+library(vegan)
+library(phyloseq)
+library(DESeq2)
+library(ComplexHeatmap)
+library(ANCOMBC)
+library(data.table)
+library(ggpubr)
+library(phytools)
+library(ggtree)
+library(NMF)
+library(igraph)
+library(GGally)
+library("doParallel")
+library("foreach")
+install.packages("GUniFrac")
+library("GUniFrac")
+
+#input qiime2 to physeq
+OTU_Table <- fread("~/Desktop/LBL/mCAFE/RCC/export/merged_table.tsv",header=TRUE)
+otumat <- as.matrix(OTU_Table,rownames=1)
+OTU <- otu_table(otumat,taxa_are_rows = TRUE)
+
+Tax_Table <- fread("~/Desktop/LBL/mCAFE/RCC/export/merged_taxonomy.tsv")
+taxmat <- as.matrix(Tax_Table,rownames=1)
+TAX <- tax_table(taxmat)
+taxonomy<-read_qza("~/Desktop/LBL/mCAFE/RCC/export/merged_taxonomy.qza")
+taxonomy<-parse_taxonomy(taxonomy$data)
+TAX <- tax_table(taxonomy)
+
+physeq = phyloseq(OTU, TAX)
+
+Metadata <- read_q2metadata("~/Desktop/LBL/mCAFE/RCC/export/merged_metadata.tsv")
+sampledata = sample_data(data.frame(
+  Metadata, row.names=sample_names(physeq), stringsAsFactors=FALSE))
+
+tree <- read_qza("~/Desktop/LBL/mCAFE/RCC/export/rooted_tree.qza")
+tree.data <- tree$data
+
+physeq <-qza_to_phyloseq(
+    features="~/Desktop/LBL/mCAFE/RCC/export/merged_table.qza",
+    tree="~/Desktop/LBL/mCAFE/RCC/export/rooted_tree.qza",
+    "~/Desktop/LBL/mCAFE/RCC/export/merged_taxonomy.qza",
+    metadata = "~/Desktop/LBL/mCAFE/RCC/export/merged_metadata.tsv"
+  )
+physeq.zOTU <-qza_to_phyloseq(
+  features="~/Desktop/LBL/mCAFE/RCC/Biogeography/QIIME2/core-metrics-results/rarefied_table.qza",
+  tree="~/Desktop/LBL/mCAFE/RCC/Biogeography/QIIME2/mafft_fastree_rooted.qza",
+  "~/Desktop/LBL/mCAFE/RCC/Biogeography/QIIME2/taxonomy.qza",
+  metadata = "~/Desktop/LBL/mCAFE/RCC/Biogeography/QIIME2/metadata.tsv"
+)
+
+# physeq.rarefied <- subset_samples(physeq.rarefied,timepoint%in%(c("Gen 3")))
+# physeq.rel.abu <- transform_sample_counts(physeq, function(x) x /sum(x))
+physeq.rarefied.new <- merge_phyloseq(otu_table(physeq.rarefied),tax_table(physeq.rarefied),sample_data(physeq.rarefied)) #remove trees
+physeq.zOTU <- merge_phyloseq(otu_table(physeq.zOTU),tax_table(physeq.zOTU),sample_data(physeq.zOTU)) #remove trees
+# physeq.zOTU.sub <- subset_samples(physeq.zOTU,Sample.Location%in%(c("Tip","Base")))
+physeq.total <- merge_phyloseq(physeq.rarefied.new,physeq.zOTU)
+physeq.total.genus <- tax_glom(physeq.total,taxrank = "Genus")
+
+#use unrarefied table to input and rarefy later
+to_remove <- t(read.csv("~/Desktop/LBL/mCAFE/RCC/DESeq2/to_remove.csv")) #remove all samples with abnormally high alpha diversity/low DNA concentration
+to_remove <- cbind(to_remove,"RCC-226")
+physeq.screen <- prune_samples(!(sample_names(physeq) %in% to_remove), physeq) 
+physeq.rarefied.R2A <- subset_samples(physeq.rarefied,carbon%in%c("1/10 R2A"))
+physeq.screen.rel.abu <- transform_sample_counts(physeq.screen, function(x) x /sum(x))
+physeq.sub <- subset_samples(physeq.screen,timepoint%in%c("Gen 6","Gen 9")) #only choosing Gen 6 and Gen 9 samples
+physeq.sub.EcoFAB <- subset_samples(physeq.screen,container%in%c("EcoFAB"))
+physeq.sub.Pot <- subset_samples(physeq.screen,container%in%c("Pot"))
+physeq.sub.Tube <- subset_samples(physeq.screen,container%in%c("Tube"))
+# physeq.sub <- subset_samples(physeq.screen,interval%in%c("3-day")) #only choosing Gen 6 and Gen 9 samples
+# physeq.sub.gen1 <- subset_samples(physeq.screen,timepoint%in%c("Gen 1"))
+# physeq.sub.1 <- subset_samples(physeq,timepoint%in%c("Gen 1","Gen 3","Gen 6","Gen 9"))
+
+set.seed(111)
+physeq.rarefied <- rarefy_even_depth(physeq.screen,rngseed=111, sample.size=85445,replace=F)
+physeq.rarefied.rel.abu <- transform_sample_counts(physeq.rarefied, function(x) x /sum(x)*100)
+physeq.sub.rarefied <- rarefy_even_depth(physeq.sub,rngseed=111, sample.size=85445,replace=F)
+physeq.sub.rarefied.gen1 <- rarefy_even_depth(physeq.sub.gen1,rngseed=111, sample.size=85445,replace=F)
+
+physeq.rarefied.sub <- subset_samples(physeq.rarefied,carbon%in%c("1/10 R2A"))
+
+#### Abundance Barplot ####
+##phylum barplot
+physeq.rel = transform_sample_counts(physeq.rarefied.sub, function(x) x/sum(x)*100)
+N <- 50
+top <- names(sort(taxa_sums(physeq.rel), decreasing = TRUE))[1:N]
+physeq.rel.top <- prune_taxa(top, physeq.rel)
+physeq.rel.top.otu <- as.data.frame(otu_table(physeq.rel.top))
+physeq.rel.top.otu <- cbind(rownames(physeq.rel.top.otu),physeq.rel.top.otu)
+colnames(physeq.rel.top.otu)[1] <- c("OTU")
+physeq.rel.top.otu.rowmean <- as.data.frame(rowMeans(physeq.rel.top.otu[,2:93]))
+physeq.rel.top.otu.rowmean <- cbind(rownames(physeq.rel.top.otu.rowmean),physeq.rel.top.otu.rowmean)
+colnames(physeq.rel.top.otu.rowmean)[1:2] <- c("OTU","rowMean")
+
+
+# agglomerate taxa
+glom <- tax_glom(physeq.rel, taxrank = 'Phylum', NArm = FALSE)
+physeq.melt <- psmelt(glom)
+# change to character for easy-adjusted level
+physeq.melt$Phylum <- as.character(physeq.melt$Phylum)
+
+# select group median > 1
+keep <- unique(physeq.melt$Phylum[physeq.melt$Abundance > 0.5])
+physeq.melt$Phylum[!(physeq.melt$Phylum %in% keep)] <- "< 1%"
+
+#to get the same rows together
+# physeq.melt_sum <- physeq.melt %>%
+#   group_by(Sample,inoculum,DOM,day,pair,Phylum) %>%
+#   summarise(Abundance=sum(Abundance))
+
+ggplot(physeq.melt, aes(x = replicate_id, y = Abundance, fill = Phylum)) + 
+  geom_bar(stat = "identity", aes(fill=Phylum)) + 
+  labs(x="", y="%") +
+  scale_fill_manual(name="Phylum",values=palette)+
+  facet_wrap(~container+timepoint, scales= "free", nrow=1) +
+  theme_classic() + 
+  theme(strip.background = element_blank(), 
+        axis.text.x.bottom = element_text(angle = -90))
+# theme(legend.position="bottom")
+
+
+##Genus barplot
+physeq.zOTU.rel <- transform_sample_counts(physeq.zOTU, function(x) x/sum(x)*100)
+physeq.rel = transform_sample_counts(physeq.rarefied, function(x) x/sum(x)*100)
+physeq.rel_f <- genefilter_sample(physeq.rel, filterfun_sample(function(x) x>=0.5),A=1)
+physeq.rel_pick <- prune_taxa(physeq.rel_f,physeq.rel)
+
+# agglomerate taxa
+glom.genus <- tax_glom(physeq.rel, taxrank = 'Genus', NArm = FALSE)
+physeq.melt.genus <- psmelt(glom.genus)
+physeq.melt.genus.sub.gen <- physeq.melt.genus[physeq.melt.genus$timepoint%in%c("Gen 6","Gen 9"),]
+# change to character for easy-adjusted level
+physeq.melt.genus$Genus <- as.character(physeq.melt.genus$Genus)
+physeq.melt.genus.sub.cont <- physeq.melt.genus[physeq.melt.genus$carbon%in%c("MixedCarbon","Glutamine")&physeq.melt.genus$timepoint%in%c("Gen 6","Gen 9"),]
+keep <- unique(physeq.melt.genus.sub.cont$Genus[physeq.melt.genus.sub.cont$Abundance > 1])
+physeq.melt.genus.sub.cont.select <- physeq.melt.genus.sub.cont[physeq.melt.genus.sub.cont$Genus%in%keep,]
+physeq.melt.genus.sub$Genus[!(physeq.melt.genus.sub$Genus %in% keep)] <- "< 1%"
+
+# physeq.melt.genus$Genus[is.na(physeq.melt.genus$Genus)&physeq.melt.genus$Family%in%c("Enterobacteriaceae")]<-"Unclassified Enterobacteriaceae"
+physeq.melt.genus.sub.EcoFAB <- physeq.melt.genus[physeq.melt.genus$container%in%c("EcoFAB"),]
+physeq.melt.genus.sub.EcoFAB.Entero <- physeq.melt.genus.sub.EcoFAB[physeq.melt.genus.sub.EcoFAB$Family%in%c("Enterobacteriaceae"),]
+physeq.melt.genus.sub.EcoFAB.Entero <- physeq.melt.genus.sub.EcoFAB.Entero[physeq.melt.genus.sub.EcoFAB.Entero$OTU%in%c("945184b6386c192c0066e0a98a154780"),]
+mean(physeq.melt.genus.sub.EcoFAB.Entero$Abundance)
+physeq.melt.genus.sub.PT <- physeq.melt.genus[physeq.melt.genus$container%in%c("Pot","Tube"),]
+physeq.melt.genus.sub.PT.Burk <- physeq.melt.genus.sub.PT[physeq.melt.genus.sub.PT$Genus%in%c("Burkholderia-Caballeronia-Paraburkholderia"),]
+mean(physeq.melt.genus.sub.PT.Burk$Abundance)
+sd(physeq.melt.genus.sub.PT.Burk$Abundance)
+
+#look at genus from unique phyla
+physeq.melt.genus.sub.R2A <-physeq.melt.genus[physeq.melt.genus$carbon%in%c("1/10 R2A"),]
+physeq.melt.genus.sub.R2A.special <- physeq.melt.genus.sub.R2A[physeq.melt.genus.sub.R2A$Phylum%in%c("Chloroflexi","Verrucomicrobiota"),]
+# physeq.melt.genus.sub.R2A.unique <- physeq.melt.genus.sub.R2A[physeq.melt.genus.sub.R2A$Phylum%in%c("Acidobacteriota","Chloroflexi", "Gemmatimonadetes", "Myxococcota", "Nitrospira", "Planctomycetota","Verrucomicrobiota"),]
+
+physeq.melt.genus.sub.Variovorax <- physeq.melt.genus[physeq.melt.genus$Genus%in%c("Variovorax"),]
+
+physeq.melt.genus.sub <- physeq.melt.genus[physeq.melt.genus$interval %in% c("7-day"),]
+physeq.melt.genus.sub <- physeq.melt.genus.sub[physeq.melt.genus.sub$carbon %in% c("MixedCarbon"),]
+physeq.melt.genus.sub$Genus[is.na(physeq.melt.genus.sub$Genus)&physeq.melt.genus.sub$Family%in%c("Enterobacteriaceae")]<-"Unclassified Enterobacteriaceae"
+physeq.melt.genus.sub$Genus[is.na(physeq.melt.genus.sub$Genus)&physeq.melt.genus.sub$Family%in%c("Xanthobacteraceae")]<-"Unclassified Xanthobacteraceae"
+physeq.melt.genus.sub$Genus[is.na(physeq.melt.genus.sub$Genus)&physeq.melt.genus.sub$Family%in%c("Comamonadaceae")]<-"Unclassified Comamonadaceae"
+physeq.melt.genus.sub$Genus[is.na(physeq.melt.genus.sub$Genus)&physeq.melt.genus.sub$Family%in%c("Yersiniaceae")]<-"Unclassified Yersiniaceae"
+physeq.melt.genus.sub$Genus[is.na(physeq.melt.genus.sub$Genus)&physeq.melt.genus.sub$Family%in%c("Lachnospiraceae")]<-"Unclassified Lachnospiraceae"
+physeq.melt.genus.sub$Genus[is.na(physeq.melt.genus.sub$Genus)&is.na(physeq.melt.genus.sub$Family)&physeq.melt.genus.sub$Order%in%c("Bacillales")]<-"Unclassified Bacillales"
+physeq.melt.genus.sub$Genus[is.na(physeq.melt.genus.sub$Genus)&physeq.melt.genus.sub$Family%in%c("Oxalobacteraceae")]<-"Unclassified Oxalobacteraceae"
+physeq.melt.genus.sub$Genus[is.na(physeq.melt.genus.sub$Genus)&physeq.melt.genus.sub$Family%in%c("Micrococcaceae")]<-"Unclassified Micrococcaceae"
+physeq.melt.genus.sub$Genus[is.na(physeq.melt.genus.sub$Genus)&physeq.melt.genus.sub$Family%in%c("Tannerellaceae")]<-"Unclassified Tannerellaceae"
+physeq.melt.genus.sub$Genus[is.na(physeq.melt.genus.sub$Genus)&physeq.melt.genus.sub$Family%in%c("Rhodocyclaceae")]<-"Unclassified Rhodocyclaceaee"
+physeq.melt.genus.sub$Genus[is.na(physeq.melt.genus.sub$Genus)&physeq.melt.genus.sub$Family%in%c("Rhizobiaceae")]<-"Unclassified Rhizobiaceae"
+
+
+
+# physeq.melt.genus.sub$Genus[is.na(physeq.melt.genus.sub$Genus)]<-"Unclassified Enterobacteriaceae"
+
+# physeq.melt.genus.sub <- physeq.melt.genus.sub %>%
+#   group_by(carbon,interval,timepoint,container,Genus) %>%
+#   mutate(median=median(Abundance))
+
+# select group median > 1
+keep <- unique(physeq.melt.genus.sub$Genus[physeq.melt.genus.sub$Abundance > 1])
+physeq.melt.genus.sub$Genus[!(physeq.melt.genus.sub$Genus %in% keep)] <- "< 1%"
+#to get the same rows together
+# physeq.melt.genus.sub_sum <- physeq.melt.genus.sub %>%
+#   group_by(Sample,carbon,interval,timepoint,container,Genus) %>%
+#   summarise(Abundance=sum(Abundance))
+
+# physeq.melt.genus_sum <- cbind(physeq.melt.genus_sum,as.numeric(as.character(physeq.melt.genus_sum$day)))
+# palette <- paletteer_d("ggsci::default_igv")
+
+col_vector = grDevices::colors()[grep('gr(a|e)y', grDevices::colors(), invert = T)]
+col_sample <- sample(col_vector,91)
+genus_name <- keep
+genus_name<- c("Unclassified Enterobacteriaceae","Unclassified Xanthobacteraceae","Unclassified Comamonadaceae","Unclassified Yersiniaceae","Unclassified Lachnospiraceae","Unclassified Bacillales","Unclassified Oxalobacteraceae","Unclassified Micrococcaceae","Unclassified Tannerellaceae","Unclassified Rhodocyclaceaee","Unclassified Rhizobiaceae","< 1%",genus_name)
+names(col_sample) <- sort(genus_name)
+
+# names(col_vector)[73]<-c("Mucilaginibacter")
+# genus_name_unique <- unique(c(genus_3day,genus_7day))
+# names(col_vector) <- sort(unique(genus_name_unique))
+# names(col_vector) <- sort(genus_name_unique)
+col_vector.select <- col_sample[names(col_sample)%in%unique(physeq.melt.genus.sub$Genus)]
+
+
+ggplot(physeq.melt.genus.sub, aes(x = replicate_id, y = Abundance, fill = Genus)) + 
+  geom_bar(stat = "identity", aes(fill=Genus)) + 
+  labs(x="", y="%") +
+  scale_fill_manual(name="Genus",values=col_vector.select)+
+  facet_wrap(~container+timepoint, scales= "free", nrow=1) +
+  theme_classic() + 
+  theme(strip.background = element_blank(), 
+        axis.text.x.bottom = element_text(angle = -90))
+  # theme(legend.position="bottom")
+
+#make barplots for enriched ASVs
+carbon_enriched.7day <- read.csv("~/Desktop/LBL/mCAFE/RCC/RCC_carbon_interval_7day_ASV.csv",row.names=1)
+carbon_enriched.7day.otu <- otu_table(as.matrix(carbon_enriched.7day),taxa_are_rows = TRUE)
+carbon_enriched.7day.merge <- phyloseq(carbon_enriched.7day.otu, tax_table(physeq.screen))
+carbon_enriched.7day.genus <- tax_glom(carbon_enriched.7day.merge,taxrank="Genus")
+carbon_enriched.7day.melt <- psmelt(carbon_enriched.7day.genus)
+carbon_enriched.7day.melt.firm <- carbon_enriched.7day.melt[carbon_enriched.7day.melt$Phylum%in%c("Firmicutes"),]
+carbon_enriched.7day.melt.bact <- carbon_enriched.7day.melt[carbon_enriched.7day.melt$Phylum%in%c("Bacteroidota"),]
+carbon_enriched.7day.melt.prot <- carbon_enriched.7day.melt[carbon_enriched.7day.melt$Phylum%in%c("Proteobacteria"),]
+carbon_enriched.7day.melt.unique <- carbon_enriched.7day.melt[carbon_enriched.7day.melt$Phylum%in%c("Acidobacteriota","Chloroflexi", "Gemmatimonadetes", "Myxococcota", "Nitrospira", "Planctomycetota","Verrucomicrobiota"),]
+
+carbon_enriched.3day <- read.csv("~/Desktop/LBL/mCAFE/RCC/RCC_carbon_interval_3day_ASV.csv",row.names=1)
+carbon_enriched.3day.otu <- otu_table(as.matrix(carbon_enriched.3day),taxa_are_rows = TRUE)
+carbon_enriched.3day.merge <- phyloseq(carbon_enriched.3day.otu, tax_table(physeq.screen))
+carbon_enriched.3day.genus <- tax_glom(carbon_enriched.3day.merge,taxrank="Genus")
+carbon_enriched.3day.melt <- psmelt(carbon_enriched.3day.genus)
+carbon_enriched.3day.melt.firm <- carbon_enriched.3day.melt[carbon_enriched.3day.melt$Phylum%in%c("Firmicutes"),]
+carbon_enriched.3day.melt.bact <- carbon_enriched.3day.melt[carbon_enriched.3day.melt$Phylum%in%c("Bacteroidota"),]
+carbon_enriched.3day.melt.prot <- carbon_enriched.3day.melt[carbon_enriched.3day.melt$Phylum%in%c("Proteobacteria"),]
+
+keep <- unique(carbon_enriched.7day.melt.firm$Genus[carbon_enriched.7day.melt.firm$Abundance > 1])
+carbon_enriched.7day.melt.firm$Genus[!(carbon_enriched.7day.melt.firm$Genus %in% keep)] <- "Genus with only 1 ASV"
+names(col_vector) <- sort(unique(carbon_enriched.7day.melt.prot$Family))
+col_vector.select <- col_vector[names(col_vector)%in%unique(carbon_enriched.3day.melt.prot$Family)]
+
+ggplot(carbon_enriched.3day.melt.bact, aes(x = Sample, y = Abundance, fill = Family)) + 
+  geom_bar(stat = "identity", aes(fill=Family)) + 
+  labs(x="Carbon Substrates", y="Number of ASVs") +
+  scale_fill_manual(name="Family",values=col_vector.select)+
+  # facet_wrap(~container, scales= "free", nrow=1) +
+  theme_classic() + 
+  theme(strip.background = element_blank(), 
+        axis.text.x.bottom = element_text(angle = -90)) +
+  theme(axis.title = element_text(size = 14, face = "bold"),axis.text=element_text(size=11),legend.title=element_text(size=12),legend.text=element_text(size=10))+
+  theme(legend.position="bottom")
+
+
+#### Alpha diversity####
+# transform data first
+alpha_bac <- estimate_richness(physeq.screen)
+Cov_mat <- as.matrix(as.data.frame(otu_table(physeq.total.genus)))
+# Cov_mat.sub <- as.matrix(as.data.frame(otu_table(physeq.sub)))
+Cov_mat_thell <- decostand(t(Cov_mat), method = "hellinger")
+# Cov_mat_thell.sub <- decostand(t(Cov_mat.sub), method = "hellinger")
+
+# Diversity_dat$timepoint <- factor(Diversity_dat$timepoint,c("Gen 1","Gen 3","Gen 6","Gen 9"))
+
+# caklculate Diversity Statistics
+Diversity_dat <- data.frame(Sample = rownames(Cov_mat_thell),
+                            species_numb = specnumber(Cov_mat_thell))
+# ,
+#                             shannon = diversity(Cov_mat_thell, index = "shannon"),
+#                             inv_simp = diversity(Cov_mat_thell, index = "invsimpson"))
+metadf <- as.data.frame(as.matrix(sample_data(physeq.total.genus)))
+# colnames(metadf)[1]<- c("Sample")
+Diversity_dat <- cbind(metadf,Diversity_dat)
+Diversity_dat <- Diversity_dat[Diversity_dat$container%in%c("None")==FALSE,]
+# Diversity_dat <- merge(metadf, Diversity_dat, by = "Sample")
+# Diversity_dat.cleaned <- Diversity_dat[Diversity_dat$Sample%in%c(""),]
+
+## Plot spec_numb
+ggplot(Diversity_dat, aes(x = carbon, y = species_numb, fill = container)) +
+  geom_jitter(width = 0.1, height = 0.1) +
+  geom_boxplot(alpha =  0.6, outlier.shape = NA)
+
+## Plot Shannon
+ggplot(Diversity_dat.sub, aes(x = interval, y = shannon, fill = container)) +
+  geom_jitter(width = 0.1, height = 0.1) +
+  geom_boxplot(alpha =  0.6, outlier.shape = NA)
+
+## Plot InvSimp
+ggplot(Diversity_dat, aes(x = ChamberLoc, y = inv_simp, fill = Loc)) +
+  geom_jitter(width = 0.1, height = 0.1) +
+  geom_boxplot(alpha =  0.6, outlier.shape = NA)
+
+ggboxplot(Diversity_dat, x = "interval", y = "species_numb",
+          color = "interval", palette = "jco",
+          add = "jitter",legend="none",)+
+  rotate_x_text(angle = 45)+
+  geom_hline(yintercept = mean(Diversity_dat$species_numb), linetype = 2)+ # Add horizontal line at base mean
+  stat_compare_means(method = "t.test",label = "p.signif",
+                     ref.group = ".all.") 
+
+#compare significant levels of individual carbons/intervals
+my_comparisons <- list(c("3-day", "7-day"))
+my_comparisons <- list(c("Gen 1", "Gen 3"),c("Gen 1", "Gen 6"),c("Gen 1", "Gen 9"),c("Gen 3", "Gen 6"),c("Gen 3", "Gen 9"),c("Gen 6", "Gen 9"))
+
+Diversity_dat <- read.csv("species_richness_022324.csv")
+
+ggboxplot(Diversity_dat, x = "Experiment", y = "species_numb",
+          color = "Experiment", palette = "jco",
+          add = "jitter",
+          facet.by = "container", short.panel.labs = TRUE)+
+  rotate_x_text(angle = 45)+
+  # geom_hline(yintercept = mean(Diversity_dat$species_numb), linetype = 2)+ #
+  # stat_compare_means(comparisons = my_comparisons,label =  "p.signif", label.x = 1.5,vjust=1)# Add pairwise comparisons p-value
+  stat_compare_means(method = "wilcox.test",label = "p.signif",
+                     ref.group = "Enrichment") 
+
+#Duttest test
+library(DescTools)
+DunnettTest(x=Diversity_dat$shannon,g=as.factor(Diversity_dat$timepoint))
+
+#### Beta diversity ####
+#PCoA using QIIME2 calculated matrix
+
+#PERMANOVA/ADONIS
+#PCoA calculated from phyloseq input
+physeq.rarefied_rel_ab = transform_sample_counts(physeq.rarefied, function(x) x /sum(x))
+# physeq_glom_genus <- tax_glom(physeq,taxrank = "Genus")
+# physeq_glom_genus_rel_ab <- transform_sample_counts(physeq_glom_genus, function(x) x /sum(x))
+# 
+# physeq_glom_species <- tax_glom(physeq,taxrank = "Species")
+# physeq_glom_species_rel_ab <- transform_sample_counts(physeq_glom_species, function(x) x /sum(x))
+
+#PCoA and adonis
+dist.bray = phyloseq::distance(physeq.zOTU, method="bray")
+dist.unifrac <- phyloseq::distance(physeq.rarefied.sub,method="unifrac")
+#extract pairs?
+
+#compare genus-level of biogeography paper and this research
+# physeq.total.genus <- tax_glom(physeq.total,taxrank = "Genus")
+Cov_mat <- as.matrix(as.data.frame(otu_table(physeq.total.genus)))
+Cov_mat_thell <- decostand(t(Cov_mat), method = "hellinger")
+dist.bray.vegdist <- vegdist(Cov_mat_thell,method="bray")
+metadf <- as.data.frame(as.matrix(sample_data(physeq.total.genus)))
+
+dist.jaccard.vegdist <- vegdist(Cov_mat_thell,method="jaccard")
+dist.jaccard.vegdist.sub <- vegdist(Cov_mat_thell.sub,method="jaccard")
+dist.bray.vegdist <- vegdist(Cov_mat_thell,method="bray")
+dist.bray.vegdist.sub <- vegdist(Cov_mat_thell.sub,method="bray")
+metadf <- as.data.frame(as.matrix(sample_data(physeq.screen)))
+# test.adonis.bray <- adonis2(dist.bray.vegdist~ timepoint, data = metadf)
+test.adonis.jaccard <- adonis2(dist.jaccard.vegdist~ carbon+interval+container+timepoint, data = metadf)
+test.adonis.jaccard
+test.adonis.unifrac <- adonis2(rbiom_weighted~carbon+interval+container+timepoint, data=metadf)
+
+##plot PCoA
+pcoa <- wcmdscale(dist.bray.vegdist, k=2,eig = TRUE)
+pcoa_points <- data.frame(Sample = rownames(pcoa$points), pcoa$points)
+colnames(pcoa_points)[2:3]<-c("PC1","PC2")
+
+pcoa_plot_table <- cbind(metadf, pcoa_points)
+# pcoa_plot_table.sub <- pcoa_plot_table[pcoa_plot_table$carbon%in%c("1/10R2A")&pcoa_plot_table$container%in%c("EcoFAB"),]
+# pcoa_plot_table.sub <- pcoa_plot_table[pcoa_plot_table$interval=="3-day",]
+
+
+ggplot(pcoa_plot_table[pcoa_plot_table$container%in%c("None")==FALSE,], aes(x = PC1, y = PC2)) +
+  stat_ellipse(aes(x=PC1, y=PC2,color=`Experiment`,group=`Experiment`),type = "norm",level=0.95)+
+  #xlim(c(-0.3, 0.2)) +
+  geom_point(size=3,aes(col=Experiment,shape=container)) +
+  scale_shape_manual(values=c(16,1,17,2), name="Inoculum") +
+  # scale_color_manual(values=palette,name="Carbon")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  # scale_size_manual(values=c(3,6),name="Timepoint")
+  theme(axis.title = element_text(size = 14, face = "bold"),axis.text=element_text(size=11),legend.title=element_text(size=12),legend.text=element_text(size=10))
+
+#color code carbon
+ggplot(pcoa_plot_table, aes(x = PC1, y = PC2)) +
+  stat_ellipse(aes(x=PC1, y=PC2,color=`carbon`,group=`carbon`),type = "norm",level=0.95)+
+  #xlim(c(-0.3, 0.2)) +
+  geom_point(size=3,aes(col=carbon, shape=timepoint)) +
+  scale_shape_manual(values=c(16,1,17,2), name="Timepoint") +
+  scale_color_manual(values=palette,name="Carbon")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  # scale_colour_discrete(name="Carbon")+
+  # scale_size_discrete(name="timepoint")+
+  theme(axis.title = element_text(size = 14, face = "bold"),axis.text=element_text(size=11),legend.title=element_text(size=12),legend.text=element_text(size=10))
+  
+  mypalette<-brewer.pal(8,"Set1")
+
+#pairwise PERMANOVA
+cbn <- combn(x=unique(metadf$timepoint), m = 2)
+p <- c()
+r <- c()
+
+for(i in 1:ncol(cbn)){
+  physeq.subs <- subset_samples(physeq.screen, timepoint %in% cbn[,i])
+  metadata_sub <- data.frame(sample_data(physeq.subs))
+  Cov_mat.sub <- as.matrix(as.data.frame(otu_table(physeq.subs)))
+  Cov_mat_thell.sub <- decostand(t(Cov_mat.sub), method = "hellinger")
+  dist.bray.vegdist.sub <- vegdist(Cov_mat_thell.sub,method="bray")
+  permanova_pairwise <- adonis3(dist.bray.vegdist.sub ~ timepoint, 
+                               data = metadata_sub)
+  p <- c(p, permanova_pairwise$`Pr(>F)`[1])
+  r <- c(r, permanova_pairwise$`R2`[1])
+}
+
+
+p.adj <- p.adjust(p, method = "BH")
+p.table <- cbind.data.frame(t(cbn), r=r,p=p, p.adj=p.adj)
+p.table
+
+#NMDS and ANOSIM
+#NMDS
+dist.bray = phyloseq::distance(physeq.screen, method="bray")
+dist.unifrac = phyloseq::distance(physeq.rarefied, method="unifrac")
+physeq.mat <- t(as.matrix(as.data.frame(otu_table(physeq.rarefied))))
+dist.bray.rarefied <- vegdist(physeq.mat,method="bray")
+
+
+NMDS_out <- metaMDS(dist.bray.vegdist, k = 3, trymax = 200)
+NMDS_out.rarefied <- metaMDS(dist.bray.rarefied, k = 4, trymax = 200)
+print(stressplot(NMDS_out))
+NMDS_out
+
+## Plot NMDS  
+NMDS_points <- data.frame(Sample = rownames(NMDS_out$points), NMDS_out$points)
+
+NMDS_plot_table <- cbind(metadf, NMDS_points)
+NMDS_plot_table.sub <- NMDS_plot_table[NMDS_plot_table$interval=="3-day",]
+
+ggplot(NMDS_plot_table.sub, aes(x = MDS1, y = MDS2)) +
+  stat_ellipse(aes(x=MDS1, y=MDS2,color=`container`,group=`container`),type = "norm",level=0.95)+
+  #xlim(c(-0.3, 0.2)) +
+  geom_point(size = 3,aes(col=container, shape=carbon)) +
+  scale_shape_manual(values=c(16,1,17,2,3,4,5,6), name="Carbon") +
+  scale_colour_discrete(name="Container")+
+  theme(axis.title = element_text(size = 14, face = "bold"),axis.text=element_text(size=11),legend.title=element_text(size=12),legend.text=element_text(size=10))
+
+#color code carbon
+ggplot(NMDS_plot_table, aes(x = MDS1, y = MDS2)) +
+  stat_ellipse(aes(x=MDS1, y=MDS2,color=`carbon`,group=`carbon`),type = "norm",level=0.95)+
+  #xlim(c(-0.3, 0.2)) +
+  geom_point(size=3,aes(col=carbon, shape=container)) +
+  scale_shape_manual(values=c(16,1,17), name="Container") +
+  scale_colour_discrete(name="Carbon")+
+  # scale_size_discrete(name="timepoint")+
+  theme(axis.title = element_text(size = 14, face = "bold"),axis.text=element_text(size=11),legend.title=element_text(size=12),legend.text=element_text(size=10))
+
+
+#ANOSIM
+carbon <- get_variable(physeq.rel.abu,"carbon")
+carbon.ano <- anosim(dist.bray.vegdist,carbon)
+carbon.ano$signif
+carbon.ano$statistic
+
+interval <- get_variable(physeq.rel.abu,"interval")
+interval.ano <- anosim(dist.bray.vegdist,interval)
+interval.ano$signif
+interval.ano$statistic
+
+container <- get_variable(physeq.rel.abu,"container")
+container.ano <- anosim(dist.bray.vegdist,container)
+container.ano$signif
+container.ano$statistic
+
+timepoint <- get_variable(physeq.rel.abu,"timepoint")
+timepoint.ano <- anosim(dist.bray.vegdist,timepoint)
+timepoint.ano$signif
+timepoint.ano$statistic
+
+#Unifrac
+
+
+
+#### DESeq2 Differential Abundance #### #modified from https://www.yanh.org/2021/01/01/microbiome-r/#deseq2 ####
+
+physeq.sub.P <- subset_samples(physeq.sub,container%in%c("Pot")) #only choosing 3-day samples
+physeq.sub.T <- subset_samples(physeq.sub,container%in%c("Tube"))
+physeq.sub.EcoFAB <- subset_samples(physeq.sub,container%in%c("EcoFAB"))
+
+physeq.sub.3day.P <- subset_samples(physeq.sub.P,interval%in%c("3-day"))
+physeq.sub.7day.P <- subset_samples(physeq.sub.P,interval%in%c("7-day"))
+physeq.sub.3day.T <- subset_samples(physeq.sub.T,interval%in%c("3-day"))
+physeq.sub.7day.T <- subset_samples(physeq.sub.T,interval%in%c("7-day"))
+physeq.sub.3day.EcoFAB <- subset_samples(physeq.sub.3day,container%in%c("EcoFAB")) #only choosing 3-day samples
+physeq.sub.7day.EcoFAB <- subset_samples(physeq.sub.7day,container%in%c("EcoFAB")) #only choosing 3-day samples
+
+
+physeq.sub.3day <- subset_samples(physeq.sub,interval%in%c("3-day")) #only choosing 3-day samples
+physeq.sub.7day <- subset_samples(physeq.sub,interval%in%c("7-day")) #only choosing 3-day samples
+# physeq.sub.3day.rarefied <- subset_samples(physeq.sub.rarefied,interval%in%c("3-day")) #only choosing 3-day samples
+# physeq.sub.7day.rarefied <- subset_samples(physeq.sub.rarefied,interval%in%c("7-day")) #only choosing 3-day samples
+# physeq.sub.3day.rarefied.rel.abu <- transform_sample_counts(physeq.sub.3day.rarefied, function(x) x/sum(x)*100)
+# physeq.sub.7day.rarefied.rel.abu <- transform_sample_counts(physeq.sub.7day.rarefied, function(x) x/sum(x)*100) 
+
+physeq.taxa.pse <- physeq.sub.T
+otu_table(physeq.taxa.pse) <- otu_table(physeq.sub.T)+1 #prevent Log2FC for 0 values
+ds.T = phyloseq_to_deseq2(physeq.taxa.pse, ~ CarbInterval)
+ds.T = DESeq(ds.T, test="Wald", fitType="parametric")
+
+physeq.taxa.pse <- physeq.sub.P
+otu_table(physeq.taxa.pse) <- otu_table(physeq.sub.P)+1  #prevent Log2FC for 0 values
+ds.P = phyloseq_to_deseq2(physeq.taxa.pse, ~ CarbInterval)
+ds.P = DESeq(ds.P, test="Wald", fitType="parametric")
+
+physeq.taxa.pse <- physeq.sub.EcoFAB
+otu_table(physeq.taxa.pse) <- otu_table(physeq.sub.EcoFAB)+1  #prevent Log2FC for 0 values
+ds.E = phyloseq_to_deseq2(physeq.taxa.pse, ~ CarbInterval)
+ds.E = DESeq(ds.E, test="Wald", fitType="parametric")
+
+physeq.taxa.pse <- physeq
+otu_table(physeq.taxa.pse) <- otu_table(physeq.sub)+1  #prevent Log2FC for 0 values
+ds = phyloseq_to_deseq2(physeq.taxa.pse, ~ CarbInterval)
+ds = DESeq(ds, test="Wald", fitType="parametric")
+
+# physeq.taxa.pse <- physeq.sub.3day.T
+# otu_table(physeq.taxa.pse) <- otu_table(physeq.sub.3day.T) #prevent Log2FC for 0 values
+# ds.3day.T = phyloseq_to_deseq2(physeq.taxa.pse, ~ carbon)
+# ds.3day.T = DESeq(ds.3day.T, test="Wald", fitType="parametric")
+# 
+# physeq.taxa.pse <- physeq.sub.3day.P
+# otu_table(physeq.taxa.pse) <- otu_table(physeq.sub.3day.P)  #prevent Log2FC for 0 values
+# ds.3day.P = phyloseq_to_deseq2(physeq.taxa.pse, ~ carbon)
+# ds.3day.P = DESeq(ds.3day.P, test="Wald", fitType="parametric")
+# 
+# physeq.taxa.pse <- physeq.sub.7day.T
+# otu_table(physeq.taxa.pse) <- otu_table(physeq.sub.7day.T) #prevent Log2FC for 0 values
+# ds.7day.T = phyloseq_to_deseq2(physeq.taxa.pse, ~ carbon)
+# ds.7day.T = DESeq(ds.7day.T, test="Wald", fitType="parametric")
+# 
+# physeq.taxa.pse <- physeq.sub.7day.P
+# otu_table(physeq.taxa.pse) <- otu_table(physeq.sub.7day.P) #prevent Log2FC for 0 valueS
+# ds.7day.P = phyloseq_to_deseq2(physeq.taxa.pse, ~ carbon)
+# ds.7day.P = DESeq(ds.7day.P, test="Wald", fitType="parametric")
+# 
+# physeq.taxa.pse <- physeq.sub.3day.EcoFAB
+# otu_table(physeq.taxa.pse) <- otu_table(physeq.sub.3day.EcoFAB) #prevent Log2FC for 0 valueS
+# ds.3day.E = phyloseq_to_deseq2(physeq.taxa.pse, ~ carbon)
+# ds.3day.E = DESeq(ds.3day.E, test="Wald", fitType="parametric")
+# 
+# physeq.taxa.pse <- physeq.sub.7day.EcoFAB
+# otu_table(physeq.taxa.pse) <- otu_table(physeq.sub.7day.EcoFAB)  #prevent Log2FC for 0 valueS
+# ds.7day.E = phyloseq_to_deseq2(physeq.taxa.pse, ~ carbon)
+# ds.7day.E = DESeq(ds.7day.E, test="Wald", fitType="parametric")
+
+# physeq.taxa.pse <- physeq.sub.T
+# otu_table(physeq.taxa.pse) <- otu_table(physeq.sub.T)+1 #prevent Log2FC for 0 values
+# ds.T = phyloseq_to_deseq2(physeq.taxa.pse, ~ carbon)
+# ds.T = DESeq(ds.T, test="Wald", fitType="parametric")
+# 
+# physeq.taxa.pse <- physeq.sub.P
+# otu_table(physeq.taxa.pse) <- otu_table(physeq.sub.P)+1  #prevent Log2FC for 0 values
+# ds.P = phyloseq_to_deseq2(physeq.taxa.pse, ~ carbon)
+# ds.P = DESeq(ds.P, test="Wald", fitType="parametric")
+# 
+# physeq.taxa.pse <- physeq.sub.EcoFAB
+# otu_table(physeq.taxa.pse) <- otu_table(physeq.sub.EcoFAB)+1  #prevent Log2FC for 0 values
+# ds.E = phyloseq_to_deseq2(physeq.taxa.pse, ~ carbon)
+# ds.E = DESeq(ds.E, test="Wald", fitType="parametric")
+# 
+# physeq.taxa.pse <- physeq.sub
+# otu_table(physeq.taxa.pse) <- otu_table(physeq.sub)  #prevent Log2FC for 0 values
+# ds = phyloseq_to_deseq2(physeq.taxa.pse, ~ carbon)
+# ds = DESeq(ds.E, test="Wald", fitType="parametric")
+
+alpha = 0.05 
+res = results(ds, alpha=alpha)
+res = res[order(res$padj, na.last=NA), ]
+
+resultsNames(ds.E) # lists the coefficients
+
+sizeFactors(ds.7day.E)
+colSums(counts(ds.7day.E))
+
+#compare the log2FC and p value results for different carbon pairs
+# res1 <- results(ds.E, contrast = c("carbon", "Malate", "1/10 R2A"), alpha = 0.05)
+# res1 <- res1[order(res1$padj, na.last=NA), ]
+# # res1 <- res1[res1$padj<0.05,] #choose only OTUs with p < 0.05
+# res1 <- as.data.frame(res1)
+# res1 <- select(res1,c("baseMean","log2FoldChange", "padj"))
+# colnames(res1) <- c("BaseMean_1/10 R2A","LFC_Malatevs1/10 R2A", "padj_Malatevs1/10 R2A")
+# res1$OTU <- rownames(res1)
+# # res1.out <- res1[order(abs(res1$`LFC_Malatevs1/10R2A`),decreasing=TRUE),]
+# # res1.out <- res1.out[c(1:20),]
+# 
+# res2 <- results(ds.E, contrast = c("carbon", "Malate", "MixedCarbon"), alpha = 0.05)
+# res2 <- res2[order(res2$padj, na.last=NA), ]
+# # res2 <- res2[res2$padj<0.05,] #choose only OTUs with p < 0.05
+# res2 <- as.data.frame(res2)
+# res2 <- select(res2,c("log2FoldChange", "padj"))
+# colnames(res2) <- c("LFC_MalatevsMixedCarbon", "padj_MalatevsMixedCarbon")
+# res2$OTU <- rownames(res2)
+# # res2.out <- res2[order(abs(res2$`LFC_MalatevsMalate`),decreasing=TRUE),]
+# # res2.out <- res2.out[c(1:20),]
+# 
+# res3 <- results(ds.E, contrast = c("carbon", "Malate", "GlucuronicAcid"), alpha = 0.05)
+# res3 <- res3[order(res3$padj, na.last=NA), ]
+# # res3 <- res3[res3$padj<0.05,] #choose only OTUs with p < 0.05
+# res3 <- as.data.frame(res3)
+# res3 <- select(res3,c("log2FoldChange", "padj"))
+# colnames(res3) <- c("LFC_MalatevsGlucuronicAcid", "padj_MalatevsGlucuronicAcid")
+# res3$OTU <- rownames(res3)
+# # res3.out <- res3[order(abs(res3$`LFC_MalatevsMalate`),decreasing=TRUE),]
+# # res3.out <- res3.out[c(1:20),]
+# 
+# res4 <- results(ds.E, contrast = c("carbon", "Malate", "Glutamine"), alpha = 0.05)
+# res4 <- res4[order(res4$padj, na.last=NA), ]
+# # res4 <- res4[res4$padj<0.05,] #choose only OTUs with p < 0.05
+# res4 <- as.data.frame(res4)
+# res4 <- select(res4,c("log2FoldChange", "padj"))
+# colnames(res4) <- c("LFC_MalatevsGlutamine", "padj_MalatevsGlutamine")
+# res4$OTU <- rownames(res4)
+# # res4.out <- res4[order(abs(res4$`LFC_MalatevsMalate`),decreasing=TRUE),]
+# # res4.out <- res4.out[c(1:20),]
+# 
+# res5 <- results(ds.E, contrast = c("carbon", "Malate", "Glucose"), alpha = 0.05)
+# res5 <- res5[order(res5$padj, na.last=NA), ]
+# # res5 <- res5[res5$padj<0.05,] #choose only OTUs with p < 0.05
+# res5 <- as.data.frame(res5)
+# res5 <- select(res5,c("log2FoldChange", "padj"))
+# colnames(res5) <- c("LFC_MalatevsGlucose", "padj_MalatevsGlucose")
+# res5$OTU <- rownames(res5)
+# # res5.out <- res5[order(abs(res5$`LFC_MalatevsMalate`),decreasing=TRUE),]
+# # res5.out <- res5.out[c(1:20),]
+# 
+# res6 <- results(ds.E, contrast = c("carbon", "Malate", "Citrate"), alpha = 0.05)
+# res6 <- res6[order(res6$padj, na.last=NA), ]
+# # res6 <- res6[res6$padj<0.05,] #choose only OTUs with p < 0.05
+# res6 <- as.data.frame(res6)
+# res6 <- select(res6,c("log2FoldChange", "padj"))
+# colnames(res6) <- c("LFC_MalatevsCitrate", "padj_MalatevsCitrate")
+# res6$OTU <- rownames(res6)
+# # res6.out <- res6[order(abs(res6$`LFC_MalatevsMalate`),decreasing=TRUE),]
+# # res6.out <- res6.out[c(1:20),]
+# 
+# res7 <- results(ds.E, contrast = c("carbon", "Malate", "Asparagine"), alpha = 0.05)
+# res7 <- res7[order(res7$padj, na.last=NA), ]
+# # res7 <- res7[res7$padj<0.05,] #choose only OTUs with p < 0.05
+# res7 <- as.data.frame(res7)
+# res7 <- select(res7,c("log2FoldChange", "padj"))
+# colnames(res7) <- c("LFC_MalatevsAsparagine", "padj_MalatevsAsparagine")
+# res7$OTU <- rownames(res7)
+# res7.out <- res7[order(abs(res7$`LFC_MalatevsMalate`),decreasing=TRUE),]
+# res7.out <- res7.out[c(1:20),]
+
+
+#compare the log2FC and p value results for different carbon_interval pairs
+res1 <- results(ds, contrast = c("CarbInterval", "1/10 R2A.7-day", "1/10 R2A.3-day"), alpha = 0.05)
+res1 <- res1[order(res1$padj, na.last=NA), ]
+# res1 <- res1[res1$padj<0.05,] #choose only OTUs with p < 0.05
+res1 <- as.data.frame(res1)
+res1 <- select(res1,c("baseMean","log2FoldChange", "padj"))
+colnames(res1) <- c("baseMean_R2A","LFC_1/10R2A_7dayvs3day", "padj_1/10R2A_7dayvs3day")
+res1$OTU <- rownames(res1)
+# res1.out <- res1[order(abs(res1$`LFC_MixedCarbonvs1/10R2A`),decreasing=TRUE),]
+# res1.out <- res1.out[c(1:20),]
+
+res2 <- results(ds, contrast = c("CarbInterval", "Asparagine.7-day", "Asparagine.3-day"), alpha = 0.05)
+res2 <- res2[order(res2$padj, na.last=NA), ]
+# res2 <- res2[res2$padj<0.05,] #choose only OTUs with p < 0.05
+res2 <- as.data.frame(res2)
+res2 <- select(res2,c("baseMean","log2FoldChange", "padj"))
+colnames(res2) <- c("baseMean_Asparagine","LFC_Asparagine_7dayvs3day", "padj_Asparagine_7dayvs3day")
+res2$OTU <- rownames(res2)
+# res2.out <- res2[order(abs(res2$`LFC_MixedCarbonvsAsparagine`),decreasing=TRUE),]
+# res2.out <- res2.out[c(1:20),]
+
+res3 <- results(ds, contrast = c("CarbInterval", "Glutamine.7-day", "Glutamine.3-day"), alpha = 0.05)
+res3 <- res3[order(res3$padj, na.last=NA), ]
+# res3 <- res3[res3$padj<0.05,] #choose only OTUs with p < 0.05
+res3 <- as.data.frame(res3)
+res3 <- select(res3,c("baseMean","log2FoldChange", "padj"))
+colnames(res3) <- c("baseMean_Glutamine","LFC_Glutamine_7dayvs3day", "padj_Glutamine_7dayvs3day")
+res3$OTU <- rownames(res3)
+# res3.out <- res3[order(abs(res3$`LFC_MixedCarbonvsMixedCarbon`),decreasing=TRUE),]
+# res3.out <- res3.out[c(1:20),]
+
+res4 <- results(ds, contrast = c("CarbInterval", "Glucose.7-day", "Glucose.3-day"), alpha = 0.05)
+res4 <- res4[order(res4$padj, na.last=NA), ]
+# res4 <- res4[res4$padj<0.05,] #choose only OTUs with p < 0.05
+res4 <- as.data.frame(res4)
+res4 <- select(res4,c("baseMean","log2FoldChange", "padj"))
+colnames(res4) <- c("baseMean_Glucose","LFC_Glucose_7dayvs3day", "padj_Glucose_7dayvs3day")
+res4$OTU <- rownames(res4)
+# res4.out <- res4[order(abs(res4$`LFC_MixedCarbonvsMixedCarbon`),decreasing=TRUE),]
+# res4.out <- res4.out[c(1:20),]
+
+res5 <- results(ds, contrast = c("CarbInterval", "Malate.7-day", "Malate.3-day"), alpha = 0.05)
+res5 <- res5[order(res5$padj, na.last=NA), ]
+# res5 <- res5[res5$padj<0.05,] #choose only OTUs with p < 0.05
+res5 <- as.data.frame(res5)
+res5 <- select(res5,c("baseMean","log2FoldChange", "padj"))
+colnames(res5) <- c("baseMean_Malate","LFC_Malate_7dayvs3day", "padj_Malate_7dayvs3day")
+res5$OTU <- rownames(res5)
+# res5.out <- res5[order(abs(res5$`LFC_MixedCarbonvsMixedCarbon`),decreasing=TRUE),]
+# res5.out <- res5.out[c(1:20),]
+
+res6 <- results(ds, contrast = c("CarbInterval", "Citrate.7-day", "Citrate.3-day"), alpha = 0.05)
+res6 <- res6[order(res6$padj, na.last=NA), ]
+# res6 <- res6[res6$padj<0.05,] #choose only OTUs with p < 0.05
+res6 <- as.data.frame(res6)
+res6 <- select(res6,c("baseMean","log2FoldChange", "padj"))
+colnames(res6) <- c("baseMean_Citrate","LFC_Citrate_7dayvs3day", "padj_Citrate_7dayvs3day")
+res6$OTU <- rownames(res6)
+# res6.out <- res6[order(abs(res6$`LFC_MixedCarbonvsMixedCarbon`),decreasing=TRUE),]
+# res6.out <- res6.out[c(1:20),]
+
+res7 <- results(ds, contrast = c("CarbInterval", "GlucuronicAcid.7-day", "GlucuronicAcid.3-day"), alpha = 0.05)
+res7 <- res7[order(res7$padj, na.last=NA), ]
+# res7 <- res7[res7$padj<0.05,] #choose only OTUs with p < 0.05
+res7 <- as.data.frame(res7)
+res7 <- select(res7,c("baseMean","log2FoldChange", "padj"))
+colnames(res7) <- c("baseMean_GlucuronicAcid","LFC_GlucuronicAcid_7dayvs3day", "padj_GlucuronicAcid_7dayvs3day")
+res7$OTU <- rownames(res7)
+# res7.out <- res7[order(abs(res7$`LFC_MixedCarbonvsGlucuronicAcid`),decreasing=TRUE),]
+# res7.out <- res7.out[c(1:20),]
+
+res8 <- results(ds, contrast = c("CarbInterval", "MixedCarbon.7-day", "MixedCarbon.3-day"), alpha = 0.05)
+res8 <- res8[order(res8$padj, na.last=NA), ]
+# res8 <- res8[res8$padj<0.05,] #choose only OTUs with p < 0.05
+res8 <- as.data.frame(res8)
+res8 <- select(res8,c("baseMean","log2FoldChange", "padj"))
+colnames(res8) <- c("baseMean_MixedCarbon","LFC_MixedCarbon_7dayvs3day", "padj_MixedCarbon_7dayvs3day")
+res8$OTU <- rownames(res8)
+res8.out <- res8[order(abs(res8$LFC_MixedCarbon_7dayvs3day),decreasing=TRUE),]
+res8.out <- res8.out[c(1:20),]
+
+#merge obtained OTUs
+library(plyr)
+carbon_comp <- join_all(list(res1,res2,res3,res4,res5,res6,res7,res8), by = 'OTU', type = 'full')
+# carbon_comp.out <- join_all(list(res1.out,res2.out,res3.out,res4.out,res5.out,res6.out,res7.out),by='OTU',type='full')
+# write.csv(carbon_comp,"~/Desktop/LBL/mCAFE/RCC/RCC_carbon_DESeq2_MixedCarbon_comp_3day.csv")
+#only keep ASVs that have pvalues < 0.05 across all samples
+# carbon_cleaned <- carbon_comp[carbon_comp$`padj_MalatevsAsparagine`<0.05&carbon_comp$`padj_MalatevsMixedCarbon`<0.05&carbon_comp$`padj_MalatevsGlucuronicAcid`<0.05&carbon_comp$`padj_MalatevsGlutamine`<0.05&carbon_comp$`padj_MalatevsGlucose`<0.05&carbon_comp$`padj_MalatevsCitrate`<0.05&carbon_comp$`padj_Malatevs1/10 R2A`<0.05,]
+# carbon_cleaned <- carbon_cleaned[carbon_cleaned$`BaseMean_MixedCarbon`>10,]
+# carbon_cleaned <- carbon_comp[carbon_comp$padj_MixedCarbonvsAsparagine<0.05&carbon_comp$padj_MixedCarbonvsGlutamine<0.05&carbon_comp$padj_MixedCarbonvsGlucose<0.05&carbon_comp$padj_MixedCarbonvsMalate<0.05&carbon_comp$padj_MixedCarbonvsCitrate<0.05&carbon_comp$padj_MixedCarbonvsGlucuronicAcid<0.05,]
+carbon_cleaned <- carbon_comp[carbon_comp$`padj_1/10R2A_7dayvs3day`<0.05|carbon_comp$padj_Asparagine_7dayvs3day<0.05|carbon_comp$padj_Glutamine_7dayvs3day<0.05|carbon_comp$padj_Glucose_7dayvs3day<0.05|carbon_comp$padj_Malate_7dayvs3day<0.05|carbon_comp$padj_Citrate_7dayvs3day<0.05|carbon_comp$padj_GlucuronicAcid_7dayvs3day<0.05|carbon_comp$padj_MixedCarbon_7dayvs3day<0.05,] #remove pvalues > 0.05
+carbon_cleaned <- carbon_cleaned[order(carbon_cleaned$`padj_1/10R2A_7dayvs3day`,na.last=NA),]
+carbon_cleaned <- carbon_cleaned[carbon_cleaned$baseMean_R2A>5,]
+# carbon_cleaned <- carbon_cleaned[carbon_cleaned$baseMean_R2A>1|carbon_cleaned$baseMean_Asparagine>1|carbon_cleaned$baseMean_Glutamine>1|carbon_cleaned$baseMean_Glucose>1|carbon_cleaned$baseMean_Malate>1|carbon_cleaned$baseMean_Citrate>1|carbon_cleaned$baseMean_GlucuronicAcid>1|carbon_cleaned$baseMean_MixedCarbon>1,] #remove pvalues > 0.05
+
+# carbon_cleaned <- carbon_cleaned[order(carbon_cleaned$`padj_1/10R2A_7dayvs3day`,na.last=NA),]
+write.csv(carbon_cleaned,"~/Desktop/LBL/mCAFE/RCC/Sep15/RCC_carbon_interval_DESeq2_comp_clean_Sep15.csv")
+
+
+#read fasta files
+require(seqinr)
+# carbon_cleaned <- read.csv("~/Desktop/LBL/mCAFE/RCC/RCC_carbon_DESeq2_GlucuronicAcid_comp_cleaned_3day.csv") #I only include OTUs with abs LogFC change > 3
+# carbon_comp_choose <- carbon_comp[carbon_comp$OTU%in%carbon_comp.out$OTU,]
+#only keep ASVs with logFC values > 2
+# carbon_cleaned.out <- carbon_cleaned[abs(carbon_cleaned$`LFC_1/10R2A_7dayvs3day`)>3|abs(carbon_cleaned$LFC_Asparagine_7dayvs3day)>3|abs(carbon_cleaned$LFC_Glutamine_7dayvs3day)>3|abs(carbon_cleaned$LFC_Glucose_7dayvs3day)>3|abs(carbon_cleaned$LFC_Malate_7dayvs3day)>3|abs(carbon_cleaned$LFC_GlucuronicAcid_7dayvs3day)>3|abs(carbon_cleaned$LFC_Citrate_7dayvs3day)>3|abs(carbon_cleaned$LFC_MixedCarbon_7dayvs3day)>3,] #remove abs values < 2
+carbon_cleaned.out <- carbon_cleaned[order(carbon_cleaned$`padj_1/10R2A_7dayvs3day`,na.last=NA),]
+# write.csv(carbon_cleaned.out,"~/Desktop/LBL/mCAFE/RCC/RCC_carbon_DESeq2_comp_clean_log2FC_EcoFAB_Sep13.csv")
+# carbon_comp_choose <- read.csv("~/Desktop/LBL/mCAFE/RCC/RCC_carbon_interval_7day_ASV.csv")
+carbon_comp_choose <- read.csv("~/Downloads/RCC_carbon_all_DESeq2_comp_all_clean_mean5_tree_tax_clean_Firmicutes.csv")
+subsetlist_carbon<-carbon_comp_choose$OTU_ID #choose only OTUs from cleaned data
+sed_fasta <- read.fasta(file = "~/Desktop/LBL/mCAFE/RCC/export/merged_rep_seqs.fasta", seqtype = "DNA",as.string = TRUE, set.attributes = FALSE)
+subset_fasta <- sed_fasta[c(which(names(sed_fasta) %in% subsetlist_carbon))]
+# subset_fasta <- sed_fasta[c("945184b6386c192c0066e0a98a154780")]
+
+write.fasta(sequences=subset_fasta,names=names(subset_fasta),file.out="~/Desktop/LBL/mCAFE/RCC/RCC_carbon_core_ASV.fasta")
+
+require(Biostrings)
+## I made a table of the subset fasta (using biostrings package) to merge with taxonomy for tree
+subset_fasta <- readDNAStringSet("~/Desktop/LBL/mCAFE/RCC/RCC_carbon_core_ASV.fasta")
+OTU_ID <- names(subset_fasta)
+sequence <- paste(subset_fasta)
+
+
+require(data.table)
+# OTU_Table <- fread("~/Desktop/LBL/mCAFE/RCC/export/merged_table.tsv")
+# OTU_Table <- as.matrix(as.data.frame(otu_table(physeq.sub.rarefied.pick.3day.rel.abu)))
+# OTU_Table <- as.matrix(as.data.frame(otu_table(physeq.rarefied.pick)))
+Tax_Table <- fread("~/Desktop/LBL/mCAFE/RCC/export/merged_taxonomy.tsv")
+sig_subset <- data.frame(OTU_ID, sequence)
+# OTU_Table <- cbind(rownames(OTU_Table), OTU_Table)
+colnames(Tax_Table)[1]<- c("OTU_ID")
+# colnames(OTU_Table)[1]<- c("OTU_ID")
+tree_tax <- merge(sig_subset, Tax_Table, by = "OTU_ID")
+colnames(physeq.rel.top.otu.rowmean)[1] <- c("OTU_ID")
+tree_tax <- merge(Tax_Table,physeq.rel.top.otu.rowmean,by="OTU_ID")
+# tree_tax <- merge(OTU_Table,Tax_Table,by = "OTU_ID")
+# tree_otu <- merge(sig_subset, OTU_Table, by = "OTU_ID")
+RCC.top50 <- read.csv("RCC_carbon_R2A_top50ASV.csv")
+RCC.netcarto.R2A <- read.csv("RCC_R2A_SPRING_module_netcarto_Dec16.csv")
+RCC.R2A.top50.relabu <- read.csv("RCC_R2A_top50_relabu.csv")
+RCC.netcarto.3day <- read.csv("RCC_3day_module_netcarto_Dec5.csv")
+RCC.netcarto.7day <- read.csv("RCC_7day_module_netcarto_Dec5.csv")
+RCC.netcarto.3day.top50 <- RCC.netcarto.3day[RCC.netcarto.3day$OTU_ID%in%props_spring.3day$lccNames1,]
+RCC.netcarto.7day.top50 <- RCC.netcarto.7day[RCC.netcarto.7day$name%in%props_spring.7day$lccNames1,]
+
+RCC.top50.network <- merge(RCC.R2A.top50.relabu,RCC.netcarto.R2A,by="OTU_ID")
+write.csv(RCC.top50.network,"RCC_top50_network_tax.csv")
+write.csv(tree_tax,"RCC_core_ASV_comp_all_tax.csv")
+# write.csv(tree_tax,"DOM_tree_tax.csv")
+colnames(carbon_comp_choose)[4]<-c("OTU_ID")
+tree_tax_sig_interval <- merge(tree_tax,carbon_comp_choose,by="OTU_ID")
+
+# tree_tax_sig_interval <- tree_tax_sig_interval[tree_tax_sig_interval$OTU_ID%in%tree_otu$OTU_ID,]
+
+
+write.csv(tree_tax_sig_interval,"~/Desktop/LBL/mCAFE/RCC/Sep15/RCC_carbon_interval_DESeq2_comp_zOTU_match_tree_tax_sig.csv")
+
+
+####Co-occurrence Network Analysis####
+library(devtools)
+install_github("zdk123/SpiecEasi")
+
+install.packages("intergraph")
+install.packages("GGally")
+devtools::install_github("briatte/ggnet")
+
+install.packages("network")
+install.packages("ggnetwork")
+install.packages("devtools")
+devtools::install_github("microsud/microbiomeutilities")
+
+library(microbiome) # data analysis and visualisation
+library(phyloseq) # also the basis of data object. Data analysis and visualisation
+library(RColorBrewer) # nice color options
+library(ggpubr) # publication quality figures, based on ggplot2
+library(dplyr) # data handling
+library(SpiecEasi) # Network analysis for sparse compositional data  
+library(network)
+library(intergraph)
+#devtools::install_github("briatte/ggnet")
+library(ggnet)
+library(igraph)
+library("microbiomeutilities")
+library(Hmisc)
+
+install.packages("rnetcarto")
+library(rnetcarto)
+#screen out OTUs with relative abundances < 0.005%
+# minTotRelAbun = 0.00005
+# x = taxa_sums(physeq.rarefied)
+# keepTaxa = (x / sum(x)) > minTotRelAbun
+# physeq.sub.rarefied.pick = prune_taxa(keepTaxa, physeq.sub.rarefied)
+physeq.rarefied.3day <- subset_samples(physeq.rarefied,interval%in%c("3-day"))
+physeq.rarefied.7day <- subset_samples(physeq.rarefied,interval%in%c("7-day"))
+
+
+
+physeq.rarefied.MC <- subset_samples(physeq.rarefied,carbon%in%c("MixedCarbon")&container%in%c("EcoFAB")&interval%in%c("7-day"))
+physeq.rarefied.Gln <- subset_samples(physeq.rarefied,carbon%in%c("Glutamine")&container%in%c("EcoFAB")&interval%in%c("7-day"))
+physeq.rarefied.Asp <- subset_samples(physeq.rarefied,carbon%in%c("Asparagine")&container%in%c("EcoFAB")&interval%in%c("7-day"))
+physeq.rarefied.Glu <- subset_samples(physeq.rarefied,carbon%in%c("Glucose")&container%in%c("EcoFAB")&interval%in%c("7-day"))
+physeq.rarefied.Mal <- subset_samples(physeq.rarefied,carbon%in%c("Malate")&container%in%c("EcoFAB")&interval%in%c("7-day"))
+physeq.rarefied.Cit <- subset_samples(physeq.rarefied,carbon%in%c("Citrate")&container%in%c("EcoFAB")&interval%in%c("7-day"))
+physeq.rarefied.GA <- subset_samples(physeq.rarefied,carbon%in%c("GlucuronicAcid")&container%in%c("EcoFAB")&interval%in%c("7-day"))
+
+# pseq.rel.EcoFAB <- microbiome::transform(physeq.rarefied.EcoFAB, "compositional")
+#
+physeq.rarefied.Gen1.E.rep1 <- subset_samples(physeq.rarefied,timepoint%in%c("Gen 1")&interval%in%c("7-day")&replicate_id%in%c("E1"))
+physeq.rarefied.Gen1.E.rep2 <- subset_samples(physeq.rarefied,timepoint%in%c("Gen 1")&interval%in%c("7-day")&replicate_id%in%c("E2"))
+physeq.rarefied.Gen1.E.rep3 <- subset_samples(physeq.rarefied,timepoint%in%c("Gen 1")&interval%in%c("7-day")&replicate_id%in%c("E3"))
+physeq.rarefied.Gen1.E.rep4 <- subset_samples(physeq.rarefied,timepoint%in%c("Gen 1")&interval%in%c("7-day")&replicate_id%in%c("E4"))
+
+core.taxa.standard.Gen1.E.rep1 <- core_members(physeq.rarefied.Gen1.E.rep1, detection = 1, prevalence = 3/4, 
+                                   include.lowest=TRUE)
+core.taxa.standard.Gen1.E.rep2 <- core_members(physeq.rarefied.Gen1.E.rep2, detection = 1, prevalence = 3/4, 
+                                            include.lowest=TRUE)
+core.taxa.standard.Gen1.E.rep3 <- core_members(physeq.rarefied.Gen1.E.rep3, detection = 1, prevalence = 3/4, 
+                                            include.lowest=TRUE)
+core.taxa.standard.Gen1.E.rep4 <- core_members(physeq.rarefied.Gen1.E.rep4, detection = 1, prevalence = 3/4, 
+                                            include.lowest=TRUE)
+
+core.taxa.standard.Gen1.E <- unique(c(core.taxa.standard.Gen1.E.rep1,core.taxa.standard.Gen1.E.rep2,core.taxa.standard.Gen1.E.rep3,core.taxa.standard.Gen1.E.rep4))
+core.taxa.standard.Gen1.E.count <- c(rep("Gen1.E",length(core.taxa.standard.Gen1.E)))
+core.taxa.standard.Gen1.E <- cbind(core.taxa.standard.Gen1.E,core.taxa.standard.Gen1.E.count)
+
+core.member <- rbind(core.taxa.standard.Gen1.T,core.taxa.standard.Gen1.E,core.taxa.standard.Gen1)
+
+
+# core.taxa.standard.MC <- core_members(physeq.rarefied.MC, detection = 1, prevalence = 40/100, 
+#                                    include.lowest=TRUE)
+# core.taxa.standard.MC.count <- c(rep("MC",length(core.taxa.standard.MC)))
+# core.taxa.standard.MC <- cbind(core.taxa.standard.MC,core.taxa.standard.MC.count)
+# 
+# core.taxa.standard.Gln <- core_members(physeq.rarefied.Gln, detection = 1, prevalence = 60/100, 
+#                                    include.lowest=TRUE)
+# core.taxa.standard.Gln.count <- c(rep("Gln",length(core.taxa.standard.Gln)))
+# core.taxa.standard.Gln <- cbind(core.taxa.standard.Gln,core.taxa.standard.Gln.count)
+# 
+# core.taxa.standard.Asp <- core_members(physeq.rarefied.Asp, detection = 1, prevalence = 60/100, 
+#                                    include.lowest=TRUE)
+# core.taxa.standard.Asp.count <- c(rep("Asp",length(core.taxa.standard.Asp)))
+# core.taxa.standard.Asp <- cbind(core.taxa.standard.Asp,core.taxa.standard.Asp.count)
+# 
+# core.taxa.standard.Glu <- core_members(physeq.rarefied.Glu, detection = 1, prevalence = 60/100, 
+#                                    include.lowest=TRUE)
+# core.taxa.standard.Glu.count <- c(rep("Glu",length(core.taxa.standard.Glu)))
+# core.taxa.standard.Glu <- cbind(core.taxa.standard.Glu,core.taxa.standard.Glu.count)
+# 
+# core.taxa.standard.Mal <- core_members(physeq.rarefied.Mal, detection = 1, prevalence = 60/100, 
+#                                    include.lowest=TRUE)
+# core.taxa.standard.Mal.count <- c(rep("Mal",length(core.taxa.standard.Mal)))
+# core.taxa.standard.Mal <- cbind(core.taxa.standard.Mal,core.taxa.standard.Mal.count)
+# 
+# core.taxa.standard.Cit <- core_members(physeq.rarefied.Cit, detection = 1, prevalence = 60/100, 
+#                                    include.lowest=TRUE)
+# core.taxa.standard.Cit.count <- c(rep("Cit",length(core.taxa.standard.Cit)))
+# core.taxa.standard.Cit <- cbind(core.taxa.standard.Cit,core.taxa.standard.Cit.count)
+# 
+# core.taxa.standard.GA <- core_members(physeq.rarefied.GA, detection = 1, prevalence = 60/100, 
+#                                    include.lowest=TRUE)
+# core.taxa.standard.GA.count <- c(rep("GA",length(core.taxa.standard.GA)))
+# core.taxa.standard.GA <- cbind(core.taxa.standard.GA,core.taxa.standard.GA.count)
+
+core.member <- rbind(core.taxa.standard.R2A,core.taxa.standard.MC,core.taxa.standard.Gln,core.taxa.standard.Asp,
+                 core.taxa.standard.Glu,core.taxa.standard.Mal,core.taxa.standard.Cit,core.taxa.standard.GA)
+write.csv(core.member,"Tube_3day_coremember_Dec5_replicateid.csv")
+
+#test interval, carbon, and original inoculua
+core.member.3day <- read.csv("RCC_R2A_3day_core_taxa.csv")
+core.member.7day <- read.csv("RCC_R2A_7day_core_taxa.csv")
+core.member.R2A <- read.csv("~/Documents/RCC_core_R2A_Dec5_replicateID.csv")
+core.member.MC <- read.csv("~/Documents/RCC_core_MC_Dec5_replicateID.csv")
+core.member.Asp <- read.csv("~/Documents/RCC_core_Asp_Dec5_replicateID.csv")
+core.member.GA <- read.csv("~/Documents/RCC_GA_core_member.csv")
+core.member.Gln <- read.csv("~/Documents/RCC_Gln_core_member.csv")
+core.member.Glu <- read.csv("~/Documents/RCC_Glu_core_member.csv")
+core.member.Cit <- read.csv("~/Documents/RCC_Cit_core_member.csv")
+core.member.Mal <- read.csv("~/Documents/RCC_Mal_core_member.csv")
+core.member.EcoFAB <- read.csv("RCC_core_member_EcoFAB.csv")
+core.member.Pot <- read.csv("RCC_core_member_Pot.csv")
+core.member.Tube <- read.csv("RCC_core_member_Tube.csv")
+core.member.all <- read.csv("RCC_core_all_Dec5_replicateID.csv")
+core.member.Gen1.3day <- read.csv("core_taxa_Gen1_3-day.csv") 
+core.member.Gen1.7day <- read.csv("core_taxa_Gen1_7-day.csv")
+core.member.Gen3.3day <- read.csv("core_taxa_Gen3_3-day.csv") 
+core.member.Gen3.7day <- read.csv("core_taxa_Gen3_7-day.csv") 
+core.member.Gen6.3day <- read.csv("core_taxa_Gen6_3-day.csv") 
+core.member.Gen6.7day <- read.csv("core_taxa_Gen6_7-day.csv") 
+core.member.Gen9.3day <- read.csv("core_taxa_Gen9_3-day.csv") 
+core.member.Gen9.7day <- read.csv("core_taxa_Gen9_7-day.csv") 
+core.member.Gen1 <- read.csv("core_taxa_R2A_Gen1.csv") 
+core.member.Gen3 <- read.csv("core_taxa_R2A_Gen3.csv") 
+core.member.Gen6 <- read.csv("core_taxa_R2A_Gen6.csv") 
+core.member.Gen9 <- read.csv("core_taxa_R2A_Gen9.csv") 
+  
+
+core.member.3day.names <- unique(core.member.3day$ASV)
+core.member.7day.names <- unique(core.member.7day$ASV)
+core.member.R2A.names <- unique(core.member.R2A$ASV)
+core.member.MC.names <- unique(core.member.MC$ASV)
+core.member.Asp.names <- unique(core.member.Asp$ASV)
+core.member.GA.names <- unique(core.member.GA$ASV)
+core.member.Gln.names <- unique(core.member.Gln$ASV)
+core.member.Glu.names <- unique(core.member.Glu$ASV)
+core.member.Cit.names <- unique(core.member.Cit$ASV)
+core.member.Mal.names <- unique(core.member.Mal$ASV)
+core.member.EcoFAB.names <- unique(core.member.EcoFAB$OTU_ID)
+core.member.Pot.names <- unique(core.member.Pot$OTU_ID)
+core.member.Tube.names <- unique(core.member.Tube$OTU_ID)
+core.member.all.names <- unique(core.member.all$ASV)
+core.member.Gen1.3day.names <- unique(core.member.Gen1.3day$ASV)
+core.member.Gen1.7day.names <- unique(core.member.Gen1.7day$ASV)
+core.member.Gen3.3day.names <- unique(core.member.Gen3.3day$ASV)
+core.member.Gen3.7day.names <- unique(core.member.Gen3.7day$ASV)
+core.member.Gen6.3day.names <- unique(core.member.Gen6.3day$ASV)
+core.member.Gen6.7day.names <- unique(core.member.Gen6.7day$ASV)
+core.member.Gen9.3day.names <- unique(core.member.Gen9.3day$ASV)
+core.member.Gen9.7day.names <- unique(core.member.Gen9.7day$ASV)
+core.member.Gen1.names <- unique(core.member.Gen1$ASV)
+core.member.Gen3.names <- unique(core.member.Gen3$ASV)
+core.member.Gen6.names <- unique(core.member.Gen6$ASV)
+core.member.Gen9.names <- unique(core.member.Gen9$ASV)
+
+alltaxa = taxa_names(physeq.rarefied)
+keepTaxa = alltaxa[alltaxa %in% core.member.7day.names]
+
+physeq.rarefied.3day <- subset_samples(physeq.rarefied,interval%in%c("3-day"))
+physeq.rarefied.7day <- subset_samples(physeq.rarefied,interval%in%c("7-day"))
+physeq.rarefied.R2A <- subset_samples(physeq.rarefied,carbon%in%c("1/10 R2A"))
+physeq.rarefied.MC <- subset_samples(physeq.rarefied,carbon%in%c("MixedCarbon"))
+physeq.rarefied.Asp <- subset_samples(physeq.rarefied,carbon%in%c("Asparagine"))
+physeq.rarefied.GA <- subset_samples(physeq.rarefied,carbon%in%c("GlucuronicAcid"))
+physeq.rarefied.Gln <- subset_samples(physeq.rarefied,carbon%in%c("Glutamine"))
+physeq.rarefied.Glu <- subset_samples(physeq.rarefied,carbon%in%c("Glucose"))
+physeq.rarefied.Cit <- subset_samples(physeq.rarefied,carbon%in%c("Citrate"))
+physeq.rarefied.Mal <- subset_samples(physeq.rarefied,carbon%in%c("Malate"))
+physeq.rarefied.EcoFAB <- subset_samples(physeq.rarefied,container%in%c("EcoFAB"))
+physeq.rarefied.Pot <- subset_samples(physeq.rarefied,container%in%c("Pot"))
+physeq.rarefied.Tube <- subset_samples(physeq.rarefied,container%in%c("Tube"))
+physeq.rarefied.Gen1 <- subset_samples(physeq.rarefied,timepoint%in%c("Gen 1"))
+physeq.rarefied.Gen3 <- subset_samples(physeq.rarefied,timepoint%in%c("Gen 3"))
+physeq.rarefied.Gen6 <- subset_samples(physeq.rarefied,timepoint%in%c("Gen 6"))
+physeq.rarefied.Gen9 <- subset_samples(physeq.rarefied,timepoint%in%c("Gen 9"))
+
+physeq.rarefied.Gen9.R2A <- subset_samples(physeq.rarefied,timepoint%in%c("Gen 9")&carbon%in%c("1/10 R2A"))
+# physeq.rarefied.Gen3.R2A <- subset_samples(physeq.rarefied.rel.abu,interval%in%c("3-day")&carbon%in%c("1/10 R2A"))
+
+# Required packages
+install.packages("devtools")
+install.packages("BiocManager")
+
+# Install NetCoMi
+BiocManager::install(pkgs = c("Biobase", "doSNOW", "fdrtool", "filematrix",
+                              "foreach", "graphics", "grDevices", "gtools",
+                              "huge", "igraph", "MASS", "Matrix", "phyloseq",
+                              "pulsar", "qgraph", "Rdpack", "snow", "SPRING",
+                              "stats", "utils", "vegan", "WGCNA"))
+BiocManager::install("limma")
+devtools::install_github("stefpeschel/NetCoMi", 
+                         dependencies = c("Depends", "Imports", "LinkingTo"),
+                         repos = c("https://cloud.r-project.org/",
+                                   BiocManager::repositories()))
+
+devtools::install_github("zdk123/SpiecEasi")
+devtools::install_github("GraceYoon/SPRING")
+
+library(NetCoMi)
+#import phyloseq 
+net_spring.3day <- netConstruct(ps1.rcc.otu.Gen1,
+                           filtTax = "highestFreq",
+                           filtTaxPar = list(highestFreq = 50),
+                           filtSamp = "totalReads",
+                           filtSampPar = list(totalReads = 1000),
+                           measure = "spring",
+                           measurePar = list(nlambda=10, 
+                                             rep.num=10),
+                           normMethod = "none", 
+                           zeroMethod = "none",
+                           sparsMethod = "none", 
+                           dissFunc = "signed",
+                           verbose = 3,
+                           seed = 123456)
+
+props_spring.R2A.nonfilter <- netAnalyze(net_spring.R2A.nonfilter, 
+                           centrLCC = TRUE,
+                           clustMethod = "cluster_fast_greedy",
+                           hubPar = "eigenvector",
+                           weightDeg = FALSE, normDeg = FALSE)
+summary(props_spring.R2A.nonfilter, numbNodes = 5L)
+plotHeat(mat = props_spring.R2A.nonfilter$graphletLCC$gcm1,
+         pmat = props_spring.R2A.nonfilter$graphletLCC$pAdjust1,
+         type = "mixed",
+         title = "GCM", 
+         colorLim = c(-1, 1),
+         mar = c(2, 0, 2, 0))
+
+# Add rectangles highlighting the four types of orbits
+graphics::rect(xleft   = c( 0.5,  1.5, 4.5,  7.5),
+               ybottom = c(11.5,  7.5, 4.5,  0.5),
+               xright  = c( 1.5,  4.5, 7.5, 11.5),
+               ytop    = c(10.5, 10.5, 7.5,  4.5),
+               lwd = 2, xpd = NA)
+
+text(6, -0.2, xpd = NA, 
+     "Significance codes:  ***: 0.001;  **: 0.01;  *: 0.05")
+p <- plot(props_spring.R2A.pick, 
+          nodeColor = "cluster", 
+          nodeSize = "eigenvector",
+          title1 = "Network on OTU level with SPRING associations", 
+          showTitle = TRUE,
+          cexTitle = 2.3,
+          cexLabels = 10)
+
+legend(0.7, 1.1, cex = 1, title = "estimated association:",
+       legend = c("+","-"), lty = 1, lwd = 3, col = c("#009900","red"), 
+       bty = "n", horiz = TRUE)
+
+x = taxa_sums(physeq.rarefied.R2A.pick)
+keepTaxa = names(x) %in% props_spring.R2A.pick$lccNames1
+physeq.rarefied.R2A.top50 = prune_taxa(keepTaxa, physeq.rarefied.R2A.pick)
+taxa_sums(physeq.rarefied.R2A.top50)
+x.sort <- sort(x/sum(x),decreasing=TRUE)
+sum(x.sort[1:50])
+x.sort[1:50]
+
+#network with spearman correlations
+net_pears.Gen1 <- netConstruct(ps1.rcc.otu.Gen1,  
+                          measure = "spearman",
+                          normMethod = "clr",
+                          zeroMethod = "multRepl",
+                          sparsMethod = "threshold",
+                          thresh = 0.3,
+                          verbose = 3)
+props_pears.Gen1 <- netAnalyze(net_pears, 
+                          clustMethod = "cluster_fast_greedy")
+summary(props_pears.Gen1)
+plot(props_pears.Gen1, 
+     nodeColor = "cluster", 
+     nodeSize = "eigenvector",
+     repulsion = 0.8,
+     shortenLabels = "intelligent",
+     highlightHubs = TRUE,
+     rmSingles = TRUE,
+     labelScale = FALSE,
+     cexLabels = 0.7,
+     nodeSizeSpread = 3,
+     cexNodes = 2,
+     hubBorderCol = "darkgray",
+     title1 = "Network on OTU level with Pearson correlations", 
+     showTitle = TRUE,
+     cexTitle = 2.3)
+
+legend(0.7, 1.1, cex = 1, title = "estimated correlation:",
+       legend = c("+","-"), lty = 1, lwd = 3, col = c("#009900","red"),
+       bty = "n", horiz = TRUE)
+
+amgut_genus <- tax_glom(ps1.rcc.otu.R2A, taxrank = "Genus")
+
+# Taxonomic table
+taxtab <- as(tax_table(amgut_genus), "matrix")
+
+# Rename taxonomic table and make Rank6 (genus) unique
+amgut_genus_renamed <- renameTaxa(amgut_genus, 
+                                  pat = "<name>", 
+                                  substPat = "<name>_<subst_name>(<subst_R>)",
+                                  numDupli = "Genus")
+
+# Network construction and analysis
+net_genus <- netConstruct(amgut_genus_renamed,
+                          taxRank = "Genus",
+                          measure = "pearson",
+                          zeroMethod = "multRepl",
+                          normMethod = "clr",
+                          sparsMethod = "threshold",
+                          thresh = 0.3,
+                          verbose = 3)
+props_genus <- netAnalyze(net_genus, clustMethod = "cluster_fast_greedy")
+# Compute layout
+graph3 <- igraph::graph_from_adjacency_matrix(net_genus$adjaMat1, 
+                                              weighted = TRUE)
+set.seed(123456)
+lay_fr <- igraph::layout_with_fr(graph3)
+
+# Row names of the layout matrix must match the node names
+rownames(lay_fr) <- rownames(net_genus$adjaMat1)
+
+set.seed(123456)
+
+plot(props_genus,
+     layout = "layout_with_fr",
+     shortenLabels = "intelligent",
+     labelLength = 10,
+     labelPattern = c(5, "'", 3, "'", 3),
+     labelScale = FALSE,
+     rmSingles = TRUE,
+     nodeSize = "clr",
+     nodeColor = "cluster",
+     hubBorderCol = "darkgray",
+     cexNodes = 2,
+     cexLabels = 1.5,
+     cexHubLabels = 2,
+     title1 = "Network on genus level with Pearson correlations", 
+     showTitle = TRUE,
+     cexTitle = 2.3)
+
+legend(0.7, 1.1, cex = 2.2, title = "estimated correlation:",
+       legend = c("+","-"), lty = 1, lwd = 3, col = c("#009900","red"), 
+       bty = "n", horiz = TRUE)
+sort(colSums(net_genus$normCounts1), decreasing = TRUE)[1:10]
+# Get phyla names
+taxtab <- as(tax_table(amgut_genus_renamed), "matrix")
+phyla <- as.factor(gsub("p__", "", taxtab[, "Phylum"]))
+names(phyla) <- taxtab[, "Genus"]
+#table(phyla)
+
+# Define phylum colors
+phylcol <- palette
+
+plot(props_genus,
+     layout = "spring",
+     repulsion = 0.84,
+     shortenLabels = "none",
+     charToRm = "g__",
+     labelScale = FALSE,
+     rmSingles = TRUE,
+     nodeSize = "clr",
+     nodeSizeSpread = 4,
+     nodeColor = "cluster", 
+     # featVecCol = phyla, 
+     # colorVec =  phylcol,
+     posCol = "darkturquoise", 
+     negCol = "orange",
+     edgeTranspLow = 0,
+     edgeTranspHigh = 40,
+     cexNodes = 2,
+     cexLabels = 1,
+     cexHubLabels = 2.5,
+     title1 = "Network on genus level with Pearson correlations", 
+     showTitle = TRUE,
+     cexTitle = 2.3)
+
+# Colors used in the legend should be equally transparent as in the plot
+phylcol_transp <- colToTransp(phylcol, 60)
+
+legend(-1.2, 1.2, cex = 1, pt.cex = 2.5, title = "Phylum:", 
+       legend=levels(phyla), col = phylcol_transp, bty = "n", pch = 16) 
+
+legend(0.7, 1.1, cex = 2.2, title = "estimated correlation:",
+       legend = c("+","-"), lty = 1, lwd = 3, col = c("darkturquoise","orange"), 
+       bty = "n", horiz = TRUE)
+
+n_R2A <- phyloseq::nsamples(ps1.rcc.otu.R2A)
+n_Asp <- phyloseq::nsamples(ps1.rcc.otu.Asp)
+
+# Network construction
+net_interval.spieceasi <- netConstruct(data = ps1.rcc.otu.3day, 
+                           data2 = ps1.rcc.otu.7day,  
+                           filtTax = "highestVar",
+                           filtTaxPar = list(highestVar = 100),
+                           filtSamp = "highestFreq",
+                           filtSampPar = list(highestFreq = n_3day),
+                           measure = "spieceasi",
+                           normMethod = "none", 
+                           zeroMethod = "none",
+                           sparsMethod = "none", 
+                           dissFunc = "signed",
+                           verbose = 3,
+                           seed = 123456)
+
+props_interval.spieceasi <- netAnalyze(net_interval.spieceasi, 
+                           centrLCC = FALSE,
+                           avDissIgnoreInf = TRUE,
+                           sPathNorm = FALSE,
+                           clustMethod = "cluster_fast_greedy",
+                           hubPar = c("degree", "eigenvector"),
+                           hubQuant = 0.9,
+                           lnormFit = TRUE,
+                           normDeg = FALSE,
+                           normBetw = FALSE,
+                           normClose = FALSE,
+                           normEigen = FALSE)
+summary(props_interval.spieceasi)
+
+plot(netprops1, 
+     sameLayout = TRUE, 
+     repulsion = 0.95,
+     layoutGroup = "union",
+     rmSingles = "inboth", 
+     nodeSize = "mclr", 
+     shortenLabels = "intelligent",
+     labelScale = FALSE,
+     cexNodes = 1.5, 
+     cexLabels = 0.5,
+     cexHubLabels = 1,
+     cexTitle = 3.8,
+     groupNames = c("3-day interval", "7-day interval"),
+     hubBorderCol  = "gray40")
+
+legend("bottom", title = "estimated association:", legend = c("+","-"), 
+       col = c("#009900","red"), inset = 0.02, cex = 4, lty = 1, lwd = 4, 
+       bty = "n", horiz = TRUE)
+
+# comp_interval.pearson <- netCompare(props_interval_pearson, 
+#                           permTest = FALSE, 
+#                           # nPerm = 100,
+#                           verbose = FALSE,
+#                           seed = 123456)
+# 
+# summary(comp_interval.pearson, 
+#         groupNames = c("Gen 1", "Gen 3"),
+#         showCentr = c("degree", "between", "closeness"), 
+#         numbNodes = 5)
+
+
+# ps1.rcc.otu.3day.R2A <- subset_samples(ps1.rcc.otu.3day,carbon%in%c("1/10 R2A"))
+# ps1.rcc.otu.7day.R2A <- subset_samples(ps1.rcc.otu.7day,carbon%in%c("1/10 R2A"))
+#   
+  
+net_interval_pearson <- netConstruct(ps1.rcc.otu.Gen6.R2A, ps1.rcc.otu.Gen9.R2A,
+                           filtTax = "highestVar",
+                           filtTaxPar = list(highestVar = 100),
+                           zeroMethod = "pseudo",
+                           normMethod = "clr",
+                           measure = "pearson",
+                           # sparsMethod = "threshold",
+                           # thresh = 0.6,
+                           verbose = 3,
+                           seed = 123456)
+
+props_interval_pearson <- netAnalyze(net_interval_pearson, clustMethod = "cluster_fast_greedy",hubPar = c("eigenvector"),lnormFit = FALSE, hubQuant = 0.90)
+# props_interval_pearson <- netAnalyze(net_interval_pearson, clustMethod = "cluster_fast_greedy",hubPar = c("degree","betweeness","closeness"),lnormFit = FALSE, hubQuant = 0.90)
+summary(props_interval_pearson)
+
+comp_interval.pearson <- netCompare(props_interval_pearson,
+                                    permTest = FALSE,
+                                    # nPerm = 100,
+                                    verbose = FALSE,
+                                    seed = 123456)
+
+summary(comp_interval.pearson,
+        groupNames = c("3-day", "7-day"),
+        showCentr = c("degree", "between", "closeness"),
+        numbNodes = 5)
+
+nclust <- as.numeric(max(names(table(props_interval_pearson$clustering$clust1))))
+
+col <- c(topo.colors(nclust), rainbow(6))
+
+plot(props_interval_pearson, 
+     sameLayout = TRUE, 
+     layoutGroup = "union", 
+     colorVec = col,
+     borderCol = "gray40", 
+     nodeSize = "degree", 
+     cexNodes = 0.9, 
+     nodeSizeSpread = 3, 
+     shortenLabels = "intelligent",
+     edgeTranspLow = 80,
+     edgeTranspHigh = 50,
+     groupNames = c("Gen 6", "Gen 9"), 
+     showTitle = TRUE, 
+     cexTitle = 2.8,
+     mar = c(1,1,3,1), 
+     repulsion = 0.9, 
+     labels = NULL,
+     labelScale = FALSE,
+     cexLabels = 1,
+     rmSingles = "inboth",
+     # nodeFilter = "clustMin", 
+     # nodeFilterPar = 10,
+     # edgeFilter = "threshold",
+     # edgeFilterPar = 0.6,
+     nodeTransp = 50, 
+     hubTransp = 30)
+
+plot(props_interval_pearson, 
+     sameLayout = TRUE, 
+     layoutGroup = 1,
+     rmSingles = "inboth", 
+     nodeSize = "mclr", 
+     labelScale = FALSE,
+     cexNodes = 1.5, 
+     cexLabels = 2.5,
+     cexHubLabels = 3,
+     cexTitle = 3.8,
+     groupNames = c("No seasonal allergies", "Seasonal allergies"),
+     hubBorderCol  = "gray40")
+
+# net_pears.Gen9 <- netConstruct(ps1.rcc.otu.Gen9,  
+#                           measure = "pearson",
+#                           normMethod = "clr",
+#                           zeroMethod = "multRepl",
+#                           sparsMethod = "threshold",
+#                           thresh = 0.3,
+#                           verbose = 3)
+
+#network with spearman correlations
+net_pears.Gen9 <- netConstruct(ps1.rcc.otu.Gen9.R2A,
+                               filtTax = "highestVar",
+                               filtTaxPar = list(highestVar = 100),
+                               zeroMethod = "pseudo",
+                               normMethod = "clr",
+                               measure = "pearson",
+                               # sparsMethod = "threshold",
+                               thresh = 0.3,
+                               verbose = 3,
+                               seed = 123456)
+props_pears.Gen9 <- netAnalyze(net_pears.Gen9, 
+                               clustMethod = "cluster_fast_greedy",lnormFit = FALSE, hubQuant = 0.90)
+summary(props_pears.Gen9)
+# plot(props_pears.Gen6, 
+#      sameLayout = FALSE, 
+#      colorVec = col,
+#      borderCol = "gray40", 
+#      nodeSize = "degree", 
+#      cexNodes = 0.9, 
+#      nodeSizeSpread = 3, 
+#      edgeTranspLow = 80, 
+#      edgeTranspHigh = 50,
+#      # groupNames = c("3-day interval", "7-day interval"), 
+#      showTitle = TRUE, 
+#      cexTitle = 2.8,
+#      mar = c(1,1,3,1), 
+#      repulsion = 0.9, 
+#      labels = TRUE,
+#      labelScale = FALSE,
+#      cexLabels = 1,
+#      rmSingles = "inboth",
+#      # nodeFilter = "clustMin", 
+#      # nodeFilterPar = 10,
+#      edgeFilter = "threshold",
+#      edgeFilterPar = 0.6,
+#      nodeTransp = 50, 
+#      hubTransp = 30)
+
+plot(props_pears.Gen9, 
+     nodeColor = "cluster", 
+     nodeSize = "eigenvector",
+     repulsion = 0.8,
+     # shortenLabels = "intelligent",
+     highlightHubs = TRUE,
+     rmSingles = TRUE,
+     labelScale = FALSE,
+     cexLabels = 0.7,
+     nodeSizeSpread = 3,
+     cexNodes = 2,
+     hubBorderCol = "darkgray",
+     title1 = "Network on OTU level with Pearson correlations", 
+     showTitle = TRUE,
+     cexTitle = 2.3)
+
+legend("bottom", title = "estimated association:", legend = c("+","-"), 
+       col = c("#009900","red"), inset = 0.02, cex = 4, lty = 1, lwd = 4, 
+       bty = "n", horiz = TRUE)
+
+graph3 <- igraph::graph_from_adjacency_matrix(net_interval.spieceasi$adjaMat2, weighted = TRUE)
+web = get.adjacency(graph3,sparse=FALSE)
+rcc.7day.comp.netcarto <- netcarto(web)
+write.csv(rcc.7day.comp.netcarto[[1]],"RCC_7day_SPIECEASI_module_netcarto_Dec21_1.csv")
+
+                                          
