@@ -1,0 +1,553 @@
+if (!requireNamespace("devtools", quietly = TRUE)){install.packages("devtools")}
+devtools::install_github("jbisanz/qiime2R") # current version is 0.99.20
+BiocManager::install("DESeq2")
+BiocManager::install("ComplexHeatmap")
+BiocManager::install("ANCOMBC")
+BiocManager::install("edgeR")
+BiocManager::install("phytools")
+BiocManager::install("ggtree")
+BiocManager::install("NMF")
+BiocManager::install("microbiome")
+install_github("ggobi/ggally")
+library(devtools)
+install_github("jokergoo/ComplexHeatmap")
+library(qiime2R)
+library(tidyverse)
+library(vegan)
+library(phyloseq)
+library(DESeq2)
+library(ComplexHeatmap)
+library(ANCOMBC)
+library(data.table)
+library(ggpubr)
+library(phytools)
+library(ggtree)
+library(NMF)
+library(igraph)
+library(GGally)
+library("doParallel")
+library("foreach")
+install.packages("GUniFrac")
+library("GUniFrac")
+library(devtools)
+devtools::install_github("benjjneb/decontam")
+library(decontam)
+library(microbiome)
+
+install.packages("RColorBrewer")                              # Install & load RColorBrewer package
+library("RColorBrewer")
+
+#input qiime2 to physeq
+physeq.stability <-qza_to_phyloseq(
+  features="~/Desktop/LBL/mCAFE/RCC/Stable transfer/Qiime_files/export/table.qza",
+  tree="~/Desktop/LBL/mCAFE/RCC/Stable transfer/Qiime_files/export/rooted_tree.qza",
+  "~/Desktop/LBL/mCAFE/RCC/Stable transfer/Qiime_files/export/classified_rep_seqs.qza",
+  metadata = "~/Desktop/LBL/mCAFE/RCC/Stable transfer/Qiime_files/export/metadata.tsv"
+)
+
+set.seed(111)
+physeq.stability.rarefied <- rarefy_even_depth(physeq.stability,rngseed=111, sample.size=87017,replace=F)
+physeq.stability.select <- subset_samples(physeq.stability,transfer%in%c("Inoculum","blank")==FALSE)
+physeq.rarefied.3day <- subset_samples(physeq.stability.select,interval%in%c("3-day"))
+physeq.rarefied.7day <- subset_samples(physeq.stability.select,interval%in%c("7-day"))
+# physeq.inoc.3day <- subset_samples(physeq.stability.rarefied,sample%in%c("3B8-H11")==TRUE&transfer%in%c("Transfer5"))
+# physeq.inoc.7day <- subset_samples(physeq.stability.rarefied,sample%in%c("7B5-H8")==TRUE&transfer%in%c("Transfer5"))
+# physeq.stability.3day.select <- prune_taxa(taxa_sums(physeq.stability.3day) > 0, physeq.stability.3day)
+# physeq.stability.7day.select <- prune_taxa(taxa_sums(physeq.stability.7day) > 0, physeq.stability.7day)
+# inoc.3day.asv <- names(taxa_sums(physeq.stability.3day.select))
+# inoc.7day.asv <- names(taxa_sums(physeq.stability.7day.select))
+#### Abundance Barplot ####
+##Genus barplot
+physeq.rel = transform_sample_counts(physeq.rarefied.select, function(x) x/sum(x)*100)
+
+# agglomerate taxa
+glom.genus <- tax_glom(physeq.rel, taxrank = 'Genus', NArm = FALSE)
+# glom.genus.filter <- prune_taxa(taxa_sums(glom.genus) > 0, glom.genus)
+# glom.genus.filter <- genefilter_sample(glom.genus, filterfun_sample(function(x) x>=0.5),A=1)
+# glom.genus.pick <- prune_taxa(glom.genus.filter,glom.genus)
+physeq.melt.genus <- psmelt(glom.genus)
+# change to character for easy-adjusted level
+physeq.melt.genus$Genus <- as.character(physeq.melt.genus$Genus)
+# physeq.melt.genus$Genus[is.na(physeq.melt.genus$Genus)&physeq.melt.genus$Family%in%c("Enterobacteriaceae")]<-"Unclassified Enterobacteriaceae"
+keep <- unique(physeq.melt.genus$Genus[physeq.melt.genus$Abundance > 0.5])
+
+# physeq.melt.genus.select <- physeq.melt.genus[physeq.melt.genus$Genus%in%keep,]
+physeq.melt.genus$Genus[!(physeq.melt.genus$Genus %in% keep)] <- "< 0.5%"
+
+# physeq.melt.genus$Genus[is.na(physeq.melt.genus$Genus)&physeq.melt.genus$Family%in%c("Geminicoccaceae")]<-"Unclassified Geminicoccaceae"
+
+palette3_info <- brewer.pal.info[brewer.pal.info$category == "qual", ]  # Extract color info
+palette3_all <- unlist(mapply(brewer.pal,                     # Create vector with all colors
+                              palette3_info$maxcolors,
+                              rownames(palette3_info)))
+palette3_all                                                  # Print all colors
+palette3 <- sample(palette3_all,15)
+
+# col_vector = grDevices::colors()[grep('gr(a|e)y', grDevices::colors(), invert = T)]
+# col_sample <- sample(col_vector,25)
+genus_name <- c("< 0.5%",keep)
+# genus_name<- c("Unclassified Enterobacteriaceae","Unclassified Xanthobacteraceae","Unclassified Comamonadaceae","Unclassified Yersiniaceae","Unclassified Lachnospiraceae","Unclassified Bacillales","Unclassified Oxalobacteraceae","Unclassified Micrococcaceae","Unclassified Tannerellaceae","Unclassified Rhodocyclaceaee","Unclassified Rhizobiaceae","< 1%",genus_name)
+names(palette3) <- sort(genus_name)
+
+# names(col_vector)[73]<-c("Mucilaginibacter")
+# genus_name_unique <- unique(c(genus_3day,genus_7day))
+# names(col_vector) <- sort(unique(genus_name_unique))
+# names(col_vector) <- sort(genus_name_unique)
+# col_vector.select <- col_sample[names(col_sample)%in%unique(physeq.melt.genus.sub$Genus)]
+
+
+ggplot(physeq.melt.genus, aes(x = transfer, y = Abundance, fill = Genus)) + 
+  geom_bar(stat = "identity", aes(fill=Genus)) + 
+  labs(x="", y="%") +
+  scale_fill_manual(name="Genus",values=palette3)+
+  facet_wrap(~sample, scales= "free", nrow=1) +
+  theme_classic() + 
+  theme(strip.background = element_blank(), 
+        axis.text.x.bottom = element_text(angle = -90))
+# theme(legend.position="bottom")
+
+
+#### Alpha diversity####
+# transform data first
+# alpha_bac <- estimate_richness(physeq.screen.noncontam)
+Cov_mat <- as.matrix(as.data.frame(otu_table(physeq.select)))
+# Cov_mat.sub <- as.matrix(as.data.frame(otu_table(physeq.sub)))
+Cov_mat_thell <- decostand(t(Cov_mat), method = "hellinger")
+# Cov_mat_thell.sub <- decostand(t(Cov_mat.sub), method = "hellinger")
+
+# Diversity_dat$timepoint <- factor(Diversity_dat$timepoint,c("Gen 1","Gen 3","Gen 6","Gen 9"))
+
+# calculate Diversity Statistics
+Diversity_dat <- data.frame(Sample = rownames(Cov_mat_thell),
+                            species_numb = specnumber(Cov_mat_thell,MARGIN = 1),
+                            shannon = vegan::diversity(Cov_mat_thell, index = "shannon", MARGIN = 1),
+                            inv_simp = vegan::diversity(Cov_mat_thell, index = "invsimpson", MARGIN = 1))
+metadf <- as.data.frame(as.matrix(sample_data(physeq.select)))
+# colnames(metadf)[1]<- c("Sample")
+Diversity_dat <- cbind(metadf,Diversity_dat)
+Diversity_dat <- Diversity_dat[Diversity_dat$sample%in%c("Blank")==FALSE,]
+Diversity_dat.stability <- Diversity_dat[Diversity_dat$transfer%in%("Transfer1-revived")==FALSE,]
+Diversity_dat.revive <- Diversity_dat[Diversity_dat$transfer%in%(c("Transfer1-revived","Transfer1"))==TRUE,]
+
+## Plot spec_numb
+ggplot(Diversity_dat.stability, aes(x = transfer, y = species_numb, group = sample)) +
+  geom_point(aes(color=sample))+geom_line(aes(color=sample))+
+  # coord_cartesian(ylim = c(1, 4))+
+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  # scale_size_manual(values=c(3,6),name="Timepoint")
+  theme(axis.title = element_text(size = 14, face = "bold"),axis.text=element_text(size=11),legend.title=element_text(size=12),legend.text=element_text(size=10))
+ggplot(Diversity_dat.revive, aes(x = Sample, y = shannon, fill = transfer)) + 
+  geom_bar(stat = "identity", aes(fill=transfer))+
+  facet_wrap(~sample, scales= "free", nrow=1)+
+  rotate_x_text(angle = 45)
+  # geom_boxplot(alpha =  0.6, outlier.shape = NA)
+
+## Plot Shannon
+ggplot(Diversity_dat.sub, aes(x = interval, y = shannon, fill = container)) +
+  geom_jitter(width = 0.1, height = 0.1) +
+  geom_boxplot(alpha =  0.6, outlier.shape = NA)
+
+## Plot InvSimp
+ggplot(Diversity_dat, aes(x = ChamberLoc, y = inv_simp, fill = Loc)) +
+  geom_jitter(width = 0.1, height = 0.1) +
+  geom_boxplot(alpha =  0.6, outlier.shape = NA)
+
+#compare multiple groups
+ggboxplot(Diversity_dat, x = "Experiment", y = "shannon",
+          color = "Experiment", palette = "jco",
+          add = "jitter",facet.by = "container")+
+  rotate_x_text(angle = 45)+
+  stat_compare_means(method = "t.test",label = "p.signif")
+# geom_hline(yintercept = median(Diversity_dat$species_numb), linetype = 2)+ # Add horizontal line at base mean
+# stat_compare_means(comparisons = my_comparisons,label =  "p.signif", label.x = 1.5,vjust=1)# Add pairwise comparisons p-value
+# 
+# stat_compare_means(method = "t.test",label = "p.signif",
+#                    ref.group = ".all.") 
+
+#compare significant levels of individual carbons/intervals
+Diversity_dat$timepoint <- factor(Diversity_dat$timepoint,levels = c("Gen 1","Gen 3","Gen 6","Gen 9"))
+my_comparisons <- list(c("3-day", "7-day"))
+my_comparisons <- list(c("Enrichment", "Biogeography"))
+my_comparisons <- list(c("Gen 1", "Gen 3"),c("Gen 1", "Gen 6"),c("Gen 1", "Gen 9"),c("Gen 3", "Gen 6"),c("Gen 3", "Gen 9"),c("Gen 6", "Gen 9"))
+mean_wt <- data.frame(container = c("EcoFAB","Pot","Tube"), median = c(median(Diversity_dat.7day[Diversity_dat.7day$container%in%"EcoFAB",]$species_numb), median(Diversity_dat.7day[Diversity_dat.7day$container%in%"Pot",]$species_numb),median(Diversity_dat.7day[Diversity_dat.7day$container%in%"Tube",]$species_numb)))
+mean_wt$container <- factor(mean_wt$container)
+ggboxplot(Diversity_dat.7day, x = "timepoint", y = "species_numb",
+          color = "carbon", palette = "jco",
+          add = "jitter",
+          facet.by = "container+carbon", nrow=3,short.panel.labs = TRUE)+
+  rotate_x_text(angle = 45)+
+  
+  geom_hline(data = mean_wt, aes(yintercept = median), linetype = 2)#+ #
+stat_compare_means(comparisons = my_comparisons,label =  "p.signif", label.x = 1.5,vjust=1)# Add pairwise comparisons p-value
+# stat_compare_means() 
+
+#Duttest test
+library(DescTools)
+DunnettTest(x=Diversity_dat$shannon,g=as.factor(Diversity_dat$timepoint))
+
+#### Beta diversity ####
+#PCoA using QIIME2 calculated matrix
+
+#PERMANOVA/ADONIS
+#PCoA calculated from phyloseq input
+physeq.rarefied_rel_ab = transform_sample_counts(physeq.rarefied, function(x) x /sum(x))
+# physeq_glom_genus <- tax_glom(physeq,taxrank = "Genus")
+# physeq_glom_genus_rel_ab <- transform_sample_counts(physeq_glom_genus, function(x) x /sum(x))
+# 
+# physeq_glom_species <- tax_glom(physeq,taxrank = "Species")
+# physeq_glom_species_rel_ab <- transform_sample_counts(physeq_glom_species, function(x) x /sum(x))
+
+#PCoA and adonis
+dist.bray = phyloseq::distance(physeq.zOTU.sub, method="bray")
+dist.unifrac <- phyloseq::distance(physeq.rarefied.sub,method="unifrac")
+#extract pairs?
+
+#compare genus-level of biogeography paper and this research
+# physeq.total.genus <- tax_glom(physeq.total,taxrank = "Genus")
+# physeq.rarefied.select <- subset_samples(physeq.rarefied,transfer%in%c("Inoculum")==FALSE)
+Cov_mat <- as.matrix(as.data.frame(otu_table(physeq.stability.select)))
+Cov_mat_thell <- decostand(t(Cov_mat), method = "hellinger")
+dist.bray.vegdist <- vegdist(Cov_mat_thell,method="bray")
+metadf <- as.data.frame(as.matrix(sample_data(physeq.stability.select)))
+
+# dist.jaccard.vegdist <- vegdist(Cov_mat_thell,method="jaccard")
+# dist.jaccard.vegdist.sub <- vegdist(Cov_mat_thell.sub,method="jaccard")
+# dist.bray.vegdist <- vegdist(Cov_mat_thell,method="bray")
+# dist.bray.vegdist.sub <- vegdist(Cov_mat_thell.sub,method="bray")
+# metadf <- as.data.frame(as.matrix(sample_data(physeq.screen)))
+test.adonis.bray <- adonis2(dist.bray.vegdist~ sample+transfer+interval, data = metadf)
+test.adonis.jaccard <- adonis2(dist.jaccard.vegdist~ carbon+interval+container+timepoint, data = metadf)
+test.adonis.jaccard
+test.adonis.unifrac <- adonis2(rbiom_weighted~carbon+interval+container+timepoint, data=metadf)
+
+##plot PCoA
+pcoa <- wcmdscale(dist.bray.vegdist, k=2,eig = TRUE)
+pcoa_points <- data.frame(Sample = rownames(pcoa$points), pcoa$points)
+colnames(pcoa_points)[2:3]<-c("PC1","PC2")
+
+pcoa_plot_table <- cbind(metadf, pcoa_points)
+pcoa_plot_table.select <- pcoa_plot_table[pcoa_plot_table$transfer%in%c("Inoculum","blank")==FALSE,]
+
+ggplot(pcoa_plot_table, aes(x = PC1, y = PC2)) +
+  stat_ellipse(aes(x=PC1, y=PC2,color=`sample`,group=`sample`),type = "t",level=0.95)+
+  #xlim(c(-0.3, 0.2)) +
+  geom_point(size=3,aes(col=sample,shape=transfer)) +
+  # scale_shape_manual(values=c(16,1,17,2), name="Timepoint") +
+  # scale_color_manual(values=palette,name="Carbon")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  # scale_size_manual(values=c(3,6),name="Timepoint")
+  theme(axis.title = element_text(size = 14, face = "bold"),axis.text=element_text(size=11),legend.title=element_text(size=12),legend.text=element_text(size=10))
+
+#color code carbon
+ggplot(pcoa_plot_table.sub, aes(x = PC1, y = PC2)) +
+  # stat_ellipse(aes(x=PC1, y=PC2,color=`carbon`,group=`carbon`),type = "norm",level=0.95)+
+  #xlim(c(-0.3, 0.2)) +
+  geom_point(size=3,aes(col=carbon, shape=timepoint)) +
+  scale_shape_manual(values=c(16,1,17,2), name="Timepoint") +
+  scale_color_manual(values=palette,name="Carbon")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  # scale_colour_discrete(name="Carbon")+
+  # scale_size_discrete(name="timepoint")+
+  theme(axis.title = element_text(size = 14, face = "bold"),axis.text=element_text(size=11),legend.title=element_text(size=12),legend.text=element_text(size=10))
+
+mypalette<-brewer.pal(8,"Set1")
+
+#pairwise PERMANOVA
+cbn <- combn(x=unique(metadf$carbon), m = 2)
+p <- c()
+r <- c()
+
+for(i in 1:ncol(cbn)){
+  physeq.subs <- subset_samples(physeq.rarefied.EcoFAB.3day.Gen9, carbon %in% cbn[,i])
+  metadata_sub <- data.frame(sample_data(physeq.subs))
+  Cov_mat.sub <- as.matrix(as.data.frame(otu_table(physeq.subs)))
+  Cov_mat_thell.sub <- decostand(t(Cov_mat.sub), method = "hellinger")
+  dist.bray.vegdist.sub <- vegdist(Cov_mat_thell.sub,method="bray")
+  permanova_pairwise <- adonis3(dist.bray.vegdist.sub ~ carbon, 
+                                data = metadata_sub)
+  p <- c(p, permanova_pairwise$aov.tab$`Pr(>F)`[1])
+  r <- c(r, permanova_pairwise$aov.tab$`R2`[1])
+}
+
+
+p.adj <- p.adjust(p, method = "BH")
+p.table <- cbind.data.frame(t(cbn), r=r,p=p, p.adj=p.adj)
+p.table
+
+#NMDS and ANOSIM
+#NMDS
+dist.bray = phyloseq::distance(physeq.screen, method="bray")
+dist.unifrac = phyloseq::distance(physeq.rarefied, method="unifrac")
+physeq.mat <- t(as.matrix(as.data.frame(otu_table(physeq.rarefied))))
+dist.bray.rarefied <- vegdist(physeq.mat,method="bray")
+
+
+NMDS_out <- metaMDS(dist.bray.vegdist, k = 3, trymax = 200)
+NMDS_out.rarefied <- metaMDS(dist.bray.rarefied, k = 4, trymax = 200)
+print(stressplot(NMDS_out))
+NMDS_out
+
+## Plot NMDS  
+NMDS_points <- data.frame(Sample = rownames(NMDS_out$points), NMDS_out$points)
+
+NMDS_plot_table <- cbind(metadf, NMDS_points)
+NMDS_plot_table.sub <- NMDS_plot_table[NMDS_plot_table$interval=="3-day",]
+
+ggplot(NMDS_plot_table.sub, aes(x = MDS1, y = MDS2)) +
+  stat_ellipse(aes(x=MDS1, y=MDS2,color=`container`,group=`container`),type = "norm",level=0.95)+
+  #xlim(c(-0.3, 0.2)) +
+  geom_point(size = 3,aes(col=container, shape=carbon)) +
+  scale_shape_manual(values=c(16,1,17,2,3,4,5,6), name="Carbon") +
+  scale_colour_discrete(name="Container")+
+  theme(axis.title = element_text(size = 14, face = "bold"),axis.text=element_text(size=11),legend.title=element_text(size=12),legend.text=element_text(size=10))
+
+#color code carbon
+ggplot(NMDS_plot_table, aes(x = MDS1, y = MDS2)) +
+  stat_ellipse(aes(x=MDS1, y=MDS2,color=`carbon`,group=`carbon`),type = "norm",level=0.95)+
+  #xlim(c(-0.3, 0.2)) +
+  geom_point(size=3,aes(col=carbon, shape=container)) +
+  scale_shape_manual(values=c(16,1,17), name="Container") +
+  scale_colour_discrete(name="Carbon")+
+  # scale_size_discrete(name="timepoint")+
+  theme(axis.title = element_text(size = 14, face = "bold"),axis.text=element_text(size=11),legend.title=element_text(size=12),legend.text=element_text(size=10))
+
+
+#ANOSIM
+carbon <- get_variable(physeq.rel.abu,"carbon")
+carbon.ano <- anosim(dist.bray.vegdist,carbon)
+carbon.ano$signif
+carbon.ano$statistic
+
+interval <- get_variable(physeq.rel.abu,"interval")
+interval.ano <- anosim(dist.bray.vegdist,interval)
+interval.ano$signif
+interval.ano$statistic
+
+container <- get_variable(physeq.rel.abu,"container")
+container.ano <- anosim(dist.bray.vegdist,container)
+container.ano$signif
+container.ano$statistic
+
+timepoint <- get_variable(physeq.rel.abu,"timepoint")
+timepoint.ano <- anosim(dist.bray.vegdist,timepoint)
+timepoint.ano$signif
+timepoint.ano$statistic
+
+#beta-disperse
+dist.bray.vegdist <- phyloseq::distance(physeq.screen,method="bray")
+sampledf <- data.frame(sample_data(physeq.screen))
+dist.bray.adonis <- adonis(dist.bray.vegdist ~ carbon, data=sampledf)
+bd <- betadisper(dist.bray.vegdist, sampledf$replicate_id)
+permutest(bd)
+
+####Co-occurrence Network Analysis####
+library(devtools)
+install_github("zdk123/SpiecEasi")
+
+install.packages("intergraph")
+install.packages("GGally")
+devtools::install_github("briatte/ggnet")
+
+install.packages("network")
+install.packages("ggnetwork")
+install.packages("devtools")
+devtools::install_github("microsud/microbiomeutilities")
+
+library(microbiome) # data analysis and visualisation
+library(phyloseq) # also the basis of data object. Data analysis and visualisation
+library(RColorBrewer) # nice color options
+library(ggpubr) # publication quality figures, based on ggplot2
+library(dplyr) # data handling
+library(SpiecEasi) # Network analysis for sparse compositional data  
+library(network)
+library(intergraph)
+#devtools::install_github("briatte/ggnet")
+library(ggnet)
+library(igraph)
+library("microbiomeutilities")
+library(Hmisc)
+
+install.packages("rnetcarto")
+library(rnetcarto)
+#screen out OTUs with relative abundances < 0.005%
+# minTotRelAbun = 0.00005
+# x = taxa_sums(physeq.rarefied)
+# keepTaxa = (x / sum(x)) > minTotRelAbun
+# physeq.sub.rarefied.pick = prune_taxa(keepTaxa, physeq.sub.rarefied)
+
+
+physeq.rarefied.3day.B8H11 <- subset_samples(physeq.rarefied.3day,sample%in%c("3B8-H11"))
+physeq.rarefied.3day.B8H4 <- subset_samples(physeq.rarefied.3day,sample%in%c("3B8-H4"))
+
+
+
+core.taxa.standard.3day.rep1 <- core_members(physeq.rarefied.3day.E.1,detection = 1, prevalence = 3/4, 
+                                             include.lowest=TRUE)
+core.taxa.standard.3day.rep2 <- core_members(physeq.rarefied.3day.E.2,detection = 1, prevalence = 3/4, 
+                                             include.lowest=TRUE)
+core.taxa.standard.3day.rep3 <- core_members(physeq.rarefied.3day.E.3,detection = 1, prevalence = 3/4, 
+                                             include.lowest=TRUE)
+core.taxa.standard.3day.rep4 <- core_members(physeq.rarefied.3day.E.4,detection = 1, prevalence = 3/4, 
+                                             include.lowest=TRUE)
+
+core.taxa.standard.3day3 <- unique(c(core.taxa.standard.3day.rep1,core.taxa.standard.3day.rep2,core.taxa.standard.3day.rep3,core.taxa.standard.3day.rep4))
+core.taxa.standard.3day <- unique(c(core.taxa.standard.3day1,core.taxa.standard.3day2,core.taxa.standard.3day3))
+
+core.taxa.standard.3day.B8H11 <- core_members(physeq.rarefied.3day.B8H11, detection = 1, prevalence = 5/6, 
+                                            include.lowest=TRUE)
+core.taxa.standard.3day.B8H4 <- core_members(physeq.rarefied.3day.B8H4, detection = 1, prevalence = 5/6, 
+                                              include.lowest=TRUE)
+
+
+core.taxa.standard.3day <- unique(c(core.taxa.standard.3day.B8H11,core.taxa.standard.3day.B8H4))
+
+physeq.rarefied.7day.B5H1 <- subset_samples(physeq.rarefied.7day,sample%in%c("7B5-H1"))
+physeq.rarefied.7day.B5H11 <- subset_samples(physeq.rarefied.7day,sample%in%c("7B5-H11"))
+physeq.rarefied.7day.B5H8 <- subset_samples(physeq.rarefied.7day,sample%in%c("7B5-H8"))
+
+core.taxa.standard.7day.B5H1 <- core_members(physeq.rarefied.7day.B5H1, detection = 1, prevalence = 5/6, 
+                                              include.lowest=TRUE)
+core.taxa.standard.7day.B5H11 <- core_members(physeq.rarefied.7day.B5H11, detection = 1, prevalence = 5/6, 
+                                             include.lowest=TRUE)
+core.taxa.standard.7day.B5H8 <- core_members(physeq.rarefied.7day.B5H8, detection = 1, prevalence = 5/6, 
+                                             include.lowest=TRUE)
+
+core.taxa.standard.7day <- unique(c(core.taxa.standard.7day.B5H1,core.taxa.standard.7day.B5H11,core.taxa.standard.7day.B5H8))
+
+write.csv(rbind(core.taxa.standard.3day,core.taxa.standard.7day),"RCC_stability_core.csv")
+
+core.taxa.standard.3day
+
+
+#test interval, carbon, and original inoculua
+alltaxa = taxa_names(physeq.rarefied)
+keepTaxa = alltaxa[alltaxa %in% core.taxa.standard.7day]
+# physeq.rarefied.pick <- prune_taxa(keepTaxa,core.taxa.standard.3day)
+physeq.rarefied.3day.pick <- prune_taxa(keepTaxa,physeq.rarefied.3day)
+physeq.rarefied.7day.pick <- prune_taxa(keepTaxa,physeq.rarefied.7day)
+ps1.rcc.otu.stability.3day <- microbiomeutilities::format_to_besthit(physeq.rarefied.3day.pick)
+ps1.rcc.otu.stability.7day <- microbiomeutilities::format_to_besthit(physeq.rarefied.7day.pick)
+
+ps1.rcc.otu.3day.matrix <- t(as.matrix(as.data.frame(otu_table(physeq.rarefied.pick))))
+# ps1.rcc.otu.7day <- microbiomeutilities::format_to_besthit(physeq.rarefied.pick)
+
+
+se.mb.rcc.R2A.top50 <- spiec.easi(physeq.rarefied.R2A.top50, method='mb', lambda.min.ratio=1e-2,
+                                  nlambda=100, pulsar.params=list(rep.num=50))
+# se.mb.rcc.3day.otu <- spiec.easi(ps1.rcc.otu.3day.matrix, method='mb', lambda.min.ratio=1e-2,
+# nlambda=100, pulsar.params=list(rep.num=50))
+
+getStability(se.mb.rcc.R2A.top50)
+sum(getRefit(se.mb.rcc.R2A.top50))/2
+ig2.mb.R2A.top50 <- adj2igraph(getRefit(se.mb.rcc.R2A.top50),  vertex.attr=list(name=taxa_names(physeq.rarefied.R2A.top50)))
+plot_network(ig2.mb.R2A.top50, physeq.rarefied.R2A.top50, type='taxa', color="Class",label=NULL)
+modules=cluster_fast_greedy(ig2.mb.R2A.top50)
+plot(modules,as.undirected(ig2.mb.R2A.top50))
+print(modules)
+modularity(modules)
+modulesOneIndices=which(modules$membership==1)
+modulesOneOtus=modules$names[modulesOneIndices]
+modulesOneOtus
+modulesTwoIndices=which(modules$membership==2)
+modulesTwoOtus=modules$names[modulesTwoIndices]
+modulesTwoOtus
+modulesThreeIndices=which(modules$membership==3)
+modulesThreeOtus=modules$names[modulesThreeIndices]
+modulesThreeOtus
+modulesFourIndices=which(modules$membership==4)
+modulesFourOtus=modules$names[modulesFourIndices]
+modulesFourOtus
+modulesFiveIndices=which(modules$membership==5)
+modulesFiveOtus=modules$names[modulesFiveIndices]
+modulesFiveOtus
+modulesSixIndices=which(modules$membership==6)
+modulesSixOtus=modules$names[modulesSixIndices]
+modulesSixOtus
+web = get.adjacency(ig2.mb.R2A.top50,sparse=FALSE)
+rcc.module.netcarto.R2A.top50 <- netcarto(web)
+write.csv(rcc.module.netcarto.R2A.top50[[1]],"RCC_R2A_top50_module_netcarto_Dec15.csv")
+
+RCC.interval.module.netcarto <- read.csv("RCC_R2A_module_netcarto_Dec5.csv")
+RCC.interval.module.netcarto$module <- factor(RCC.interval.module.netcarto$module)
+# RCC.container.module.netcarto$module <- as.factor(RCC.7day.module.netcarto$module)
+ggplot(RCC.interval.module.netcarto, aes(x = participation, y = connectivity)) +
+  # stat_ellipse(aes(x=PC1, y=PC2,color=`container`,group=`container`),type = "norm",level=0.95)+
+  #xlim(c(-0.3, 0.2)) +
+  geom_point(size=2,aes(col=module,shape=Top50)) +
+  # geom_point(aes(shape=SynCom))+
+  geom_hline(yintercept=2.5, linetype="dashed") +
+  geom_vline(xintercept=0.62, linetype="dashed") +
+  # geom_vline(xintercept=0.05, linetype="dashed") +
+  # geom_vline(xintercept=0.30, linetype="dashed") +
+  # geom_vline(xintercept=0.75, linetype="dashed") +
+  # geom_vline(xintercept=0.80, linetype="dashed") +
+  xlim(0,0.8)+
+  ylim(-2,3.5)+
+  # scale_shape_manual(values=c(16,1,17,2,3,4,5,6), name="Carbon") +
+  # scale_color_manual(values=palette,name="Carbon")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  # scale_size_manual(values=c(3,6),name="Timepoint")
+  theme(axis.title = element_text(size = 14, face = "bold"),axis.text=element_text(size=11),legend.title=element_text(size=12),legend.text=element_text(size=10))
+
+####comparing 1/10 R2A Gen 9 results with zOTU results####
+physeq.rarefied.R2A.Gen9 <- subset_samples(physeq.rarefied.R2A,timepoint%in%c("Gen 9"))
+physeq.rarefied.R2A.Gen1 <- subset_samples(physeq.rarefied.R2A,timepoint%in%c("Gen 1"))
+# Remove samples with less than MINREADS from phyloseq object
+physeq.rarefied.R2A.Gen9 = filter_taxa(physeq.rarefied.R2A.Gen9, function(x) mean(x) > 0, TRUE)
+physeq.rarefied.R2A.Gen1 = filter_taxa(physeq.rarefied.R2A.Gen1, function(x) mean(x) > 0, TRUE)
+
+physeq.rarefied.R2A.Gen9.otunames <- rownames(as.data.frame(otu_table(physeq.rarefied.R2A.Gen9)))
+physeq.rarefied.R2A.Gen1.otunames <- rownames(as.data.frame(otu_table(physeq.rarefied.R2A.Gen1)))
+
+physeq.rarefied.R2A.Gen9.select <- physeq.rarefied.R2A.Gen9.otunames[!physeq.rarefied.R2A.Gen9.otunames%in%physeq.rarefied.R2A.Gen1.otunames]
+
+# assuming you have a phyloseq object named 'physeq'
+physeq.rarefied.R2A.Gen9.subset <- subset(otu_table(physeq.rarefied.R2A.Gen9), rownames(otu_table(physeq.rarefied.R2A.Gen9)) %in% physeq.rarefied.R2A.Gen9.select)
+physeq.rarefied.R2A.Gen9.subset <- merge_phyloseq(physeq.rarefied.R2A.Gen9.subset, tax_table(physeq.rarefied.R2A.Gen9), sample_data(physeq.rarefied.R2A.Gen9), phy_tree(physeq.rarefied.R2A.Gen9))
+physeq.rarefied.R2A.Gen9.subset.mean = filter_taxa(physeq.rarefied.R2A.Gen9.subset, function(x) mean(x) > 1, TRUE)
+physeq.rarefied.R2A.Gen9.subset.mean5 = filter_taxa(physeq.rarefied.R2A.Gen9.subset, function(x) mean(x) > 5, TRUE)
+
+physeq.rarefied.R2A.Gen9.species <- tax_glom(physeq.rarefied.R2A.Gen9,taxrank = "Species")
+
+
+####network analysis####
+physeq.rarefied.3day.B8H11 <- subset_samples(physeq.rarefied.3day,sample%in%c("3B8-H11"))
+physeq.rarefied.3day.B8H4 <- subset_samples(physeq.rarefied.3day,sample%in%c("3B8-H4"))
+
+
+
+core.taxa.standard.3day.rep1 <- core_members(physeq.rarefied.3day.E.1,detection = 1, prevalence = 3/4, 
+                                             include.lowest=TRUE)
+core.taxa.standard.3day.rep2 <- core_members(physeq.rarefied.3day.E.2,detection = 1, prevalence = 3/4, 
+                                             include.lowest=TRUE)
+core.taxa.standard.3day.rep3 <- core_members(physeq.rarefied.3day.E.3,detection = 1, prevalence = 3/4, 
+                                             include.lowest=TRUE)
+core.taxa.standard.3day.rep4 <- core_members(physeq.rarefied.3day.E.4,detection = 1, prevalence = 3/4, 
+                                             include.lowest=TRUE)
+
+core.taxa.standard.3day3 <- unique(c(core.taxa.standard.3day.rep1,core.taxa.standard.3day.rep2,core.taxa.standard.3day.rep3,core.taxa.standard.3day.rep4))
+core.taxa.standard.3day <- unique(c(core.taxa.standard.3day1,core.taxa.standard.3day2,core.taxa.standard.3day3))
+
+core.taxa.standard.3day.B8H11 <- core_members(physeq.rarefied.3day.B8H11, detection = 1, prevalence = 5/6, 
+                                              include.lowest=TRUE)
+core.taxa.standard.3day.B8H4 <- core_members(physeq.rarefied.3day.B8H4, detection = 1, prevalence = 5/6, 
+                                             include.lowest=TRUE)
+
+
+core.taxa.standard.3day <- unique(c(core.taxa.standard.3day.B8H11,core.taxa.standard.3day.B8H4))
+
+physeq.rarefied.7day.B5H1 <- subset_samples(physeq.rarefied.7day,sample%in%c("7B5-H1"))
+physeq.rarefied.7day.B5H11 <- subset_samples(physeq.rarefied.7day,sample%in%c("7B5-H11"))
+physeq.rarefied.7day.B5H8 <- subset_samples(physeq.rarefied.7day,sample%in%c("7B5-H8"))
+
+core.taxa.standard.7day.B5H1 <- core_members(physeq.rarefied.7day.B5H1, detection = 1, prevalence = 5/6, 
+                                             include.lowest=TRUE)
+core.taxa.standard.7day.B5H11 <- core_members(physeq.rarefied.7day.B5H11, detection = 1, prevalence = 5/6, 
+                                              include.lowest=TRUE)
+core.taxa.standard.7day.B5H8 <- core_members(physeq.rarefied.7day.B5H8, detection = 1, prevalence = 5/6, 
+                                             include.lowest=TRUE)
+
+core.taxa.standard.7day <- unique(c(core.taxa.standard.7day.B5H1,core.taxa.standard.7day.B5H11,core.taxa.standard.7day.B5H8))
+
+write.csv(rbind(core.taxa.standard.3day,core.taxa.standard.7day),"RCC_stability_core.csv")
+
