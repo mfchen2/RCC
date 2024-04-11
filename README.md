@@ -1,0 +1,1 @@
+Repository for the R script used for the manuscript "Developing Stable, Simplified, Functional Consortia from Brachypodium Rhizosphere for Microbial Application in Sustainable Agriculture". If you have any questions, please contact mingfeichen@lbl.gov
